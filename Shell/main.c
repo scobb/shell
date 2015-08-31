@@ -78,7 +78,7 @@ void shell_loop() {
 
     // loop forever
     while (status != FINISHED){
-        printf("> ");
+        printf("$ ");
         line = shell_read_line(&status);
         args = shell_split_line(line);
         status |= shell_execute(args);
@@ -118,6 +118,7 @@ char** shell_split_line(char* line){
     int bufsize = SHELL_TOK_BUFSIZE;
     int position = 0;
     char** tokens = (char**)malloc(bufsize * sizeof(char*));
+    memset(tokens, 0, bufsize);
     char* token;
     allocation_check(tokens);
 
