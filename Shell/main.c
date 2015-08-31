@@ -1,5 +1,8 @@
 #include <stdlib.h>
 #include <stdio.h>
+void shell_loop();
+char* shell_read_line();
+
 int main(int argc, char **argv) {
 
 	shell_loop();
@@ -7,7 +10,7 @@ int main(int argc, char **argv) {
 	return 0;
 }
 
-void shell__loop() {
+void shell_loop() {
 	char* line;
 	char** args;
 	int status;
