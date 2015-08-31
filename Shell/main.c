@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 // definitions
 #define FINISHED 1
@@ -15,6 +17,24 @@ void shell_loop();
 char* shell_read_line(int* status);
 void handle_signal();
 char** shell_split_line(char* line);
+int shell_cd(char** args);
+int shell_help(char** args);
+int shell_exit(char** args);
+int shell_num_builtins();
+int shell_execute(char** args);
+
+// constants
+const char* BUILTIN_STR[] = {
+    "cd",
+    "help",
+    "exit"
+};
+
+int (*BUILTIN_FUNC[]) (char **) = {
+    &shell_cd,
+    &shell_help,
+    &shell_exit
+};
 
 // main
 int main(int argc, char **argv) {
@@ -22,6 +42,10 @@ int main(int argc, char **argv) {
     shell_loop();
 
     return 0;
+}
+
+int shell_num_builtins() {
+    return sizeof(BUILTIN_STR) / sizeof(char*);
 }
 
 // allocation check
@@ -53,14 +77,11 @@ void shell_loop() {
     signal(SIGINT, handle_signal);
 
     // loop forever
-    while (1){
+    while (status != FINISHED){
         printf("> ");
         line = shell_read_line(&status);
-        if (status == FINISHED)
-            break;
-        printf("%s\n", line);
         args = shell_split_line(line);
-        //status = shell_execute(args);
+        status |= shell_execute(args);
         free(line);
         free(args);
 
@@ -81,7 +102,6 @@ char* shell_read_line(int* status) {
             // break the main loop
             *status = FINISHED;
             buf[position] = 0;
-            printf("status is %d\n", *status);
             return buf;
         } else if (c == '\n') {
             // finish the command
@@ -104,7 +124,6 @@ char** shell_split_line(char* line){
     // get first token
     token = strtok(line, SHELL_TOK_DELIM);
     while (token != NULL) {
-        printf("Token: %s\n", token);
         tokens[position++] = token;
 
         // too many tokens?
@@ -116,4 +135,58 @@ char** shell_split_line(char* line){
         // get next token
         token = strtok(NULL, SHELL_TOK_DELIM);
     }
+    return tokens;
+}
+
+int shell_launch(char** args){
+    pid_t pid, wpid;
+    int status;
+    pid = fork();
+    if (pid == 0) {
+        if (execvp(args[0], args) == -1) {
+            perror("shell");
+        }
+        exit(1);
+    } else if (pid < 0) {
+        // for error
+        perror("shell");
+
+    } else {
+        do {
+            wpid = waitpid(pid, &status, WUNTRACED);
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+    }
+    return 0;
+}
+
+int shell_execute(char** args){
+    int i;
+    if (args[0] == NULL) {
+        return 0;
+    }
+    for (i = 0; i < shell_num_builtins(); ++i){
+        if (strcmp(args[0], BUILTIN_STR[i]) == 0) {
+            return (*BUILTIN_FUNC[i])(args);
+        }
+    }
+    return shell_launch(args);
+}
+
+int shell_cd(char** args){
+    if (args[1] == NULL) {
+        fprintf(stderr, "Shell: expected argument to \"cd\"\n");
+    } else {
+        if (chdir(args[1]) != 0) {
+            perror("shell");
+        }
+    }
+    return 0;
+}
+
+int shell_help(char** args){
+    return 0;
+}
+
+int shell_exit(char** args){
+    return 1;
 }
