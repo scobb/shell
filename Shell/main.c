@@ -30,7 +30,7 @@ void shell_loop() {
 char* shell_read_line() {
 	int bufsize = SHELL_RL_BUFSIZE;
 	int position = 0;
-	char* buf = malloc(sizeof(char) * bufsize);
+	char* buf = (char*)malloc(sizeof(char) * bufsize);
 	int c;
 
 	if (!buf) {
@@ -51,7 +51,7 @@ char* shell_read_line() {
 
 		if (position >= bufsize) {
 			bufsize += SHELL_RL_BUFSIZE;
-			buf = realloc(buf, bufsize);
+			buf = (char*)realloc(buf, bufsize);
 			if (!buf) {
 				fprintf(stderr, "Shell: allocation error\n");
 				exit(1);
