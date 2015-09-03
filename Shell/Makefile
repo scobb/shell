@@ -1,2 +1,2 @@
 all:
-	g++ -ansi main.c -o shell
+	gcc -ansi main.c -o shell
