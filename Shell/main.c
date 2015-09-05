@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <stddef.h>
 
 /* definitions */
@@ -14,6 +15,7 @@
 #define SHELL_PIPELINE_BUFSIZE 8
 #define SHELL_TOK_DELIM " "
 #define INVALID_DESCRIPTOR -1
+#define FILE_SPECIAL_CHARS 4
 
 typedef struct Process{
     char* proc;
@@ -47,13 +49,11 @@ int (*BUILTIN_FUNC[]) (char **) = {
     &shell_exit
 };
 
-const char* SPECIAL_CHARS[] = {
+const char* SPECIAL_CHARS[FILE_SPECIAL_CHARS] = {
     "<",
     ">",
     "2>",
     "2>&1",
-    "|",
-    "&"
 };
 
 /* main */
@@ -216,10 +216,10 @@ Process* shell_create_pipeline(char** args){
 }
 
 int shell_execute_pipeline(Process* pipeline){
-    int i, child_pid, j;
+    int i, j, k;
     int num_procs = 1;
     int* fds;
-    int pid, wpid, status;
+    int pid, wpid, status, fd;
     if (pipeline[0].proc == NULL){
         return 0;
     }
@@ -242,37 +242,57 @@ int shell_execute_pipeline(Process* pipeline){
         printf("pid is %d\n", pid);
         if (pid == 0) {
             /* child */
+            /* piped input */
+            printf("Child %d: %s\n", i, pipeline[i].proc);
+            if (i > 0){
+                printf("Child %s piping input fds[%d]: %d...\n", pipeline[i].proc, (i-1)*2, fds[(i - 1) * 2]);
+                if (dup2(fds[(i - 1) * 2], 0) == -1) {
+                    perror("shell");
+                    _exit(1);
+                }
+                printf("Closing output fds[%d]: %d\n", (i - 1) * 2 + 1, fds[(i-1)*2+1]);
+                fflush(stdout);
+                close(fds[(i - 1) * 2 + 1]);
+            } 
+            /* piped output */
             if (pipeline[i + 1].proc != NULL) {
-                printf("Child %s piping output %d...\n", pipeline[i].proc, fds[i * 2 + 1]);
-                /* piped output */
+                printf("Closing input fds[%d]: %d\n", i*2, fds[i * 2]);
+                fflush(stdout);
+                close(fds[i * 2]);
+                printf("Child %s piping output fds[%d]: %d...\n", pipeline[i].proc, i*2, fds[i * 2 + 1]);
+                fflush(stdout);
                 if (dup2(fds[i * 2 + 1], 1) == -1) {
                     printf("omg\n");
                     perror("shell");
                     _exit(1);
                 }
-                printf("Closing input fds[%d]: %d\n", i*2, fds[i * 2]);
-                fflush(stdout);
-                close(fds[i * 2]);
-                printf("got here...");
             } 
-            if (i > 0){
-                /* piped input */
-                printf("Child %s piping input %d...\n", pipeline[i].proc, fds[(i - 1) * 2]);
-                if (dup2(fds[(i - 1) * 2], 0) == -1) {
-                    perror("shell");
-                    _exit(1);
-                }
-                printf("Closing output fds[%d]: %d\n", (i-1)*2+1, fds[(i-1)*2+1]);
-                fflush(stdout);
-                close(fds[(i-1) * 2 + 1]);
-            } 
-            printf("Child %s executing...\n", pipeline[i].proc);
+            /* file IO -- supercede the piped output */
             j = 0;
             while (pipeline[i].args[j] != NULL){
-                printf("Arg %d: %s\n", j, pipeline[i].args[j++]);
+                printf("Checking %s for >\n", pipeline[i].args[j]);
+                if (strcmp(pipeline[i].args[j], ">") == 0){
+                    if (pipeline[i].args[j + 1] != NULL) {
+                        fd = open(pipeline[i].args[j+1], O_RDWR|O_CREAT|O_TRUNC, 777);
+                        printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);
+                        if (dup2(fd, 1) == -1) {
+                            perror("shell");
+                            _exit(1);
+                        }
+                    }
+                    pipeline[i].args[j] = NULL;
+                    /* TODO - open (create) file, dup stdout */
+                }
+                /*for (k=0; k < FILE_SPECIAL_CHARS; ++k){
+                    if (strcmp(SPECIAL_CHARS[k], pipeline[i].args[j]) == 0){
+
+                    }
+                }*/
+                ++j;
             }
 
-            /* TODO - take a slice of the args */
+
+            /* execute */
             execvp(pipeline[i].proc, pipeline[i].args);
             if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 perror("shell");
@@ -295,10 +315,16 @@ int shell_execute_pipeline(Process* pipeline){
     } while (!WIFEXITED(status) && !WIFSIGNALED(status));
 
     /* clean up file descriptors */
-    if (num_procs > 1){
+    printf("File descriptor cleanup...\n");
+    for (i = 0; i < (num_procs - 1) * 2; ++i){
+        if (close(fds[i]) != 0){
+            printf("error closing fds[%d]\n", i);
+        }
+    }
+/*    if (num_procs > 1){
         close(fds[0]);
         close(fds[1]);
-    }
+    }*/
     if (fds){
         free(fds);
     }
