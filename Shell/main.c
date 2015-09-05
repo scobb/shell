@@ -220,6 +220,7 @@ int shell_execute_pipeline(Process* pipeline){
     int num_procs = 1;
     int* fds;
     int pid, wpid, status, fd;
+    char* errmsg;
     if (pipeline[0].proc == NULL){
         return 0;
     }
@@ -286,7 +287,27 @@ int shell_execute_pipeline(Process* pipeline){
                     }
                     /* stop args here */
                     pipeline[i].args[j] = NULL;
-                    ++j;
+                    ++j;    
+                    continue;
+                }
+
+                printf("Checking %s for 2>\n", pipeline[i].args[j]);
+                if (strcmp(pipeline[i].args[j], "2>") == 0){
+                    printf("FOUND IT\n");
+                    if (pipeline[i].args[j + 1] != NULL) {
+                        fd = open(pipeline[i].args[j+1], O_WRONLY|O_CREAT|O_TRUNC, 0777);
+                        if (fd > 0){
+                            fchmod(fd, 0644);
+                        }
+                        printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);
+                        if (dup2(fd, 2) == -1) {
+                            perror("shell");
+                            _exit(1);
+                        }
+                    }
+                    /* stop args here */
+                    pipeline[i].args[j] = NULL;
+                    ++j;    
                     continue;
                 }
 
@@ -295,10 +316,11 @@ int shell_execute_pipeline(Process* pipeline){
                     printf("FOUND IT\n");
                     if (pipeline[i].args[j + 1] != NULL) {
                         fd = open(pipeline[i].args[j+1], O_RDWR);
-                        /*if (fd < 0){
-                            sprintf(buf, "Unable to open %s: no such file\n", pipeline[i].args[j+1]);
-                            write(2, buf, strlen(buf));
-                        }*/
+                        if (fd < 0){
+                            errmsg = "shell: no such file\n";
+                            write(2, errmsg, strlen(errmsg));
+                            _exit(1);
+                        }
                         printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);
                         if (dup2(fd, 0) == -1) {
                             perror("shell");
@@ -307,6 +329,20 @@ int shell_execute_pipeline(Process* pipeline){
                     }
                     pipeline[i].args[j] = NULL;
                     ++j;
+                    continue;
+                }
+
+                printf("Checking %s for 2>&1\n", pipeline[i].args[j]);
+                if (strcmp(pipeline[i].args[j], "2>") == 0){
+                    printf("FOUND IT\n");     
+                    if (dup2(1, 2) == -1) {
+                        perror("shell");
+                        _exit(1);
+                    }
+
+                    /* stop args here */
+                    pipeline[i].args[j] = NULL;
+                    ++j;    
                     continue;
                 }
                 
