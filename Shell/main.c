@@ -1,5 +1,5 @@
 /* standard includes*/
-#include <stdlib.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
@@ -15,14 +15,19 @@
 #define SHELL_TOK_DELIM " "
 #define INVALID_DESCRIPTOR -1
 
+typedef struct Process{
+    char* proc;
+    char** args;
+} Process;
+
 /* forward declarations */
 void shell_loop();
 char* shell_read_line(int* status);
 void handle_signal();
 char** shell_split_line(char* line);
-char*** shell_create_pipeline(char** args);
+Process* shell_create_pipeline(char** args);
 int shell_cd(char** args);
-int shell_execute_pipeline(char***);
+int shell_execute_pipeline(Process*);
 int shell_help(char** args);
 int shell_exit(char** args);
 int shell_num_builtins();
@@ -67,7 +72,7 @@ int shell_num_builtins() {
 void allocation_check(void* p) {
     if (!p) {
         fprintf(stderr, "Shell: allocation error\n");
-        exit(1);
+        _exit(1);
     }
 }
 
@@ -75,16 +80,17 @@ void allocation_check(void* p) {
 void handle_signal(int signum) {
     if (signum == SIGINT) {
         printf("GOT SIGINT\n");
-        exit(0);
+        _exit(0);
     }
 }
 
 /* primary functionality -- shell loop */
 void shell_loop() {
     /* local vars for parsing */
+    int i = 0;
     char* line;
     char** args;
-    char*** pipeline;
+    Process* pipeline;
 
     /* we'll go until we find eof. */
     int status = 0;
@@ -100,9 +106,16 @@ void shell_loop() {
         pipeline = shell_create_pipeline(args);
         status |= shell_execute_pipeline(pipeline);
         /*status |= shell_execute(args);*/
-        free(line);
-        free(args);
+        while (pipeline[i].args != NULL){
+            /*printf("Freeing args for proc %d at %X: %s\n", i, (int)pipeline[i].args, pipeline[i].proc);*/
+            free(pipeline[i++].args);
+        }
+        /*printf("Freeing pipeline at %X\n", (int)pipeline);*/
         free(pipeline);
+        /*printf("Freeing line at %X\n", (int)line);*/
+        free(line);
+        /*printf("Freeing args at %X\n", (int)args);*/
+        free(args);
 
     }
 }
@@ -111,6 +124,7 @@ char* shell_read_line(int* status) {
     int bufsize = SHELL_RL_BUFSIZE;
     int position = 0;
     char* buf = (char*)malloc(sizeof(char) * bufsize);
+    /*printf("Allocating line to %X\n", (int)buf);*/
     int c;
     allocation_check(buf); 
 
@@ -136,8 +150,9 @@ char** shell_split_line(char* line){
     int bufsize = SHELL_TOK_BUFSIZE;
     int position = 0;
     char** tokens = (char**)malloc(bufsize * sizeof(char*));
-    memset(tokens, 0, bufsize);
+    /*printf("Allocating args to %X\n", (int)tokens);*/
     allocation_check(tokens);
+    memset(tokens, 0, bufsize * sizeof(char*));
 
     token = strtok(line, SHELL_TOK_DELIM);
     while (token != NULL) {
@@ -146,93 +161,127 @@ char** shell_split_line(char* line){
         if (position >= bufsize) {
             bufsize += SHELL_TOK_BUFSIZE;
             tokens = (char**)realloc(tokens, bufsize * sizeof(char*));
+            /*printf("Reallocating args to %X...\n", tokens);*/
             allocation_check(tokens);
+            memset(tokens, 0, bufsize * sizeof(char*));
         }
         token = strtok(NULL, SHELL_TOK_DELIM);
     }
     return tokens;
 }
 
-char*** shell_create_pipeline(char** args){
+Process* shell_create_pipeline(char** args){
     int i = 0;
     int j = 0;
+    int k = 0;
+    int offset;
     int bufsize = SHELL_PIPELINE_BUFSIZE;
-    char*** pipeline = (char***)malloc(bufsize * sizeof(char**));
-    memset(pipeline, 0, bufsize);
+    Process* pipeline = (Process*)malloc(bufsize * sizeof(Process));
+    /*printf("allocating pipeline at %X\n", pipeline);*/
     allocation_check(pipeline);
+    memset(pipeline, 0, bufsize * sizeof(Process));
     while (args[i] != NULL) {
-        pipeline[j++] = &args[i];
+        pipeline[j].proc = args[i];
+
+        /*pipeline[j++] = &args[i];*/
         while (args[i] != NULL && strcmp(args[i], "|") != 0){
             ++i;
         }
-        if (args[i])
-            args[i++] = 0;
+        /*printf("pipline[%d].args: %X\n", j, (int)pipeline[j].args);*/
+        pipeline[j].args = (char**) malloc ((i - k + 1) * sizeof(char*));
+        allocation_check(pipeline[j].args);
+        memset(pipeline[j].args, 0, (i - k + 1) * sizeof(char*));
+        offset = k;
+        /*printf("%d args allocated for process %d at %X...\n", (i-k+1), j, (int)pipeline[j].args);*/
+        for (; k < i; ++k){
+            pipeline[j].args[k - offset] = args[k];
+            printf("pipeline[%d].args[%d] = %s\n", j, k-offset, args[k]);
+        }
+        /*printf("Writing NULL to pipeline[%d].args[%d] at %X\n", j, k- offset, (int)pipeline[j].args[k]);*/
+        pipeline[j].args[k - offset] = NULL;
+
+        if (args[i]) {
+            /*printf("Writing NULL to %X\n", (int)args[i]);*/
+            args[i++] = NULL;
+        }
+        ++j;
+        ++k;
     }
-    pipeline[j] = NULL;
+    pipeline[j].proc = NULL;
     i = 0;
-    while (pipeline[i] != NULL){
-        printf("%s\n", pipeline[i++][0]);
+    while (pipeline[i].proc != NULL){
+        printf("%s\n", pipeline[i++].proc);
     }
     return pipeline;
 }
 
-int shell_execute_pipeline(char*** pipeline){
-    int i, child_pid;
+int shell_execute_pipeline(Process* pipeline){
+    int i, child_pid, j;
     int num_procs = 1;
-    int* fds = NULL;
+    int* fds;
     int pid, wpid, status;
-    if (pipeline[0] == NULL){
+    if (pipeline[0].proc == NULL){
         return 0;
     }
 
-    while (pipeline[num_procs] != NULL){
+    while (pipeline[num_procs].proc != NULL){
         ++num_procs;
     }
     printf("num_procs: %d\n", num_procs);
     if (num_procs > 1) {
         fds = (int*)malloc(2 * (num_procs - 1) * sizeof(int));
-
-        for (i = 0; i < num_procs - 1; ++i){
+        for (i = 0; i < num_procs - 1; ++i) {
             pipe(fds + i * 2);
             printf("InputFD: %d\n", *(fds + i * 2));
             printf("OutputFD: %d\n", *(fds + i * 2 + 1));
         }
     }
-
     for (i = 0; i < num_procs; ++i){
-        if (i > 0){
-            /* piped input */
-            printf("Child %s piping input %d...\n", pipeline[i][0], fds[(i - 1) * 2]);
-            if (dup2(fds[(i - 1) * 2], 0) == -1) {
-                perror("shell");
-                exit(1);
-            }
-        }
-        if (pipeline[i + 1] != NULL) {
-            printf("Child %s piping output %d...\n", pipeline[i][0], fds[i * 2 + 1]);
-            /* piped output */
-            if (dup2(fds[i * 2 + 1], 1) == -1) {
-                printf("omg\n");
-                perror("shell");
-                exit(1);
-            }
-            printf("got here...");
-        }
         printf("calling fork...\n");
         pid = fork();
+        printf("pid is %d\n", pid);
         if (pid == 0) {
             /* child */
-            printf("Child %s executing...\n", pipeline[i][0]);
-            if (fds != NULL){
+            if (pipeline[i + 1].proc != NULL) {
+                printf("Child %s piping output %d...\n", pipeline[i].proc, fds[i * 2 + 1]);
+                /* piped output */
+                if (dup2(fds[i * 2 + 1], 1) == -1) {
+                    printf("omg\n");
+                    perror("shell");
+                    _exit(1);
+                }
+                printf("Closing input fds[%d]: %d\n", i*2, fds[i * 2]);
+                fflush(stdout);
+                close(fds[i * 2]);
+                printf("got here...");
+            } 
+            if (i > 0){
+                /* piped input */
+                printf("Child %s piping input %d...\n", pipeline[i].proc, fds[(i - 1) * 2]);
+                if (dup2(fds[(i - 1) * 2], 0) == -1) {
+                    perror("shell");
+                    _exit(1);
+                }
+                printf("Closing output fds[%d]: %d\n", (i-1)*2+1, fds[(i-1)*2+1]);
+                fflush(stdout);
+                close(fds[(i-1) * 2 + 1]);
+            } 
+            printf("Child %s executing...\n", pipeline[i].proc);
+            j = 0;
+            while (pipeline[i].args[j] != NULL){
+                printf("Arg %d: %s\n", j, pipeline[i].args[j++]);
             }
+
             /* TODO - take a slice of the args */
-            if (execvp(pipeline[0][0], pipeline[0]) == -1) {
+            execvp(pipeline[i].proc, pipeline[i].args);
+            if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 perror("shell");
-                exit(1);
+                _exit(1);
             } else if (pid < 0) {
                 perror("shell");
-                exit(1);
+                _exit(1);
             }
+            _exit(0);
         } 
 
     }
@@ -240,15 +289,17 @@ int shell_execute_pipeline(char*** pipeline){
     /* parent code */
     do {
         /* wait for very last process in pipeline */
-        wpid = waitpid(pid, &status, WUNTRACED);
+        /*printf("Waiting... on pid %d\n", pid);
+        wpid = waitpid(pid, &status, WUNTRACED);*/
+        wait(NULL);
     } while (!WIFEXITED(status) && !WIFSIGNALED(status));
 
     /* clean up file descriptors */
+    if (num_procs > 1){
+        close(fds[0]);
+        close(fds[1]);
+    }
     if (fds){
-        for (i = 0; i < (num_procs - 1) * 2; ++i){
-            printf("Closing %d\n", fds[i]);
-            close(fds[i]);
-        }
         free(fds);
     }
     return 0;
@@ -264,12 +315,12 @@ int shell_launch(char** args){
         /* child */
         if (execvp(args[0], args) == -1) {
             perror("shell");
-            exit(1);
+            _exit(1);
         }
-        exit(1);
+        _exit(1);
     } else if (pid < 0) {
         perror("shell");
-        exit(1);
+        _exit(1);
 
     } else {
         do {
@@ -298,7 +349,7 @@ int shell_cd(char** args){
     } else {
         if (chdir(args[1]) != 0) {
             perror("shell");
-            exit(1);
+            _exit(1);
         }
     }
     return 0;
