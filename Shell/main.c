@@ -272,17 +272,44 @@ int shell_execute_pipeline(Process* pipeline){
             while (pipeline[i].args[j] != NULL){
                 printf("Checking %s for >\n", pipeline[i].args[j]);
                 if (strcmp(pipeline[i].args[j], ">") == 0){
+                    printf("FOUND IT\n");
                     if (pipeline[i].args[j + 1] != NULL) {
-                        fd = open(pipeline[i].args[j+1], O_RDWR|O_CREAT|O_TRUNC, 777);
+                        fd = open(pipeline[i].args[j+1], O_WRONLY|O_CREAT|O_TRUNC, 0777);
+                        if (fd > 0){
+                            fchmod(fd, 0644);
+                        }
                         printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);
                         if (dup2(fd, 1) == -1) {
                             perror("shell");
                             _exit(1);
                         }
                     }
+                    /* stop args here */
                     pipeline[i].args[j] = NULL;
-                    /* TODO - open (create) file, dup stdout */
+                    ++j;
+                    continue;
                 }
+
+                printf("Checking %s for <\n", pipeline[i].args[j]);
+                if (strcmp(pipeline[i].args[j], "<") == 0){
+                    printf("FOUND IT\n");
+                    if (pipeline[i].args[j + 1] != NULL) {
+                        fd = open(pipeline[i].args[j+1], O_RDWR);
+                        /*if (fd < 0){
+                            sprintf(buf, "Unable to open %s: no such file\n", pipeline[i].args[j+1]);
+                            write(2, buf, strlen(buf));
+                        }*/
+                        printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);
+                        if (dup2(fd, 0) == -1) {
+                            perror("shell");
+                            _exit(1);
+                        }
+                    }
+                    pipeline[i].args[j] = NULL;
+                    ++j;
+                    continue;
+                }
+                
                 /*for (k=0; k < FILE_SPECIAL_CHARS; ++k){
                     if (strcmp(SPECIAL_CHARS[k], pipeline[i].args[j]) == 0){
 
@@ -293,6 +320,7 @@ int shell_execute_pipeline(Process* pipeline){
 
 
             /* execute */
+            printf("executing %s\n", pipeline[i].proc);
             execvp(pipeline[i].proc, pipeline[i].args);
             if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 perror("shell");
