@@ -25,6 +25,7 @@ typedef struct Process{
     char* proc;
     char** args;
     int job_id;
+    int pid;
 } Process;
 
 /* forward declarations */
@@ -88,10 +89,21 @@ void handle_signal(int signum) {
     }
 }
 void handle_sigchld(int signum) {
-    printf("HANDLER\n");
+    int i;
     int pid = waitpid((pid_t)(-1), 0, WNOHANG);
     while (pid > 0) {
         printf("SIGCHILD pid: %d\n", pid);
+        for (i = 0; i < MAX_JOBS; ++i){
+            if (i < 10) {
+                printf("PROCESS_TABLE[%d].pid: %d\n", i, PROCESS_TABLE[i].pid);
+            }
+            if (PROCESS_TABLE[i].pid == pid && PROCESS_TABLE[i].job_id != INVALID_JOB_ID){
+                printf("FOUND IT: %s\n", PROCESS_TABLE[i].proc);
+                PROCESS_TABLE[i].job_id = INVALID_JOB_ID;
+                free(PROCESS_TABLE[i].proc);
+                break;
+            }
+        }
         pid = waitpid((pid_t)(-1), 0, WNOHANG);
     }
 }
@@ -241,9 +253,9 @@ Process* shell_create_pipeline(char** args, int job_id){
 }
 
 int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
-    int i, j, k;
+    int i, j, k, table_ind;
     int num_procs = 1;
-    int* fds;
+    int* fds = NULL;
     int pid, wpid, status, fd;
     char* errmsg;
     if (pipeline[0].proc == NULL){
@@ -263,6 +275,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         }
     }
     j=0;
+    table_ind = 0;
     for (i = 0; i < num_procs; ++i){
         printf("calling fork...\n");
         pid = fork();
@@ -270,12 +283,16 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         if (pid != 0) {
             /* parent -- insert into process table */
             j = 0;
-            while (PROCESS_TABLE[j].job_id != INVALID_JOB_ID) {
-                printf("j: %d\n", j);
-                ++j;
+            pipeline[i].pid = pid;
+            while (PROCESS_TABLE[table_ind].job_id != INVALID_JOB_ID) {
+                printf("table_ind: %d: %s\n", table_ind, PROCESS_TABLE[table_ind].proc);
+                ++table_ind;
             }
-            printf("Adding table entry for process %s in job %d\n", pipeline[i].proc, pipeline[i].job_id);
-            memcpy(&PROCESS_TABLE[j], &pipeline[i], sizeof(Process));
+            printf("Adding table entry for process %s in job %d at entry %d\n", pipeline[i].proc, pipeline[i].job_id, table_ind);
+            memcpy(&PROCESS_TABLE[table_ind], &pipeline[i], sizeof(Process));
+            PROCESS_TABLE[table_ind].proc = (char*) malloc((strlen(pipeline[i].proc) + 1) * sizeof(char));
+            strcpy(PROCESS_TABLE[table_ind].proc, pipeline[i].proc);
+            printf("From the table: %s\n", PROCESS_TABLE[table_ind].proc);
         /*    if (setpgid(pid, job_id+1000) == -1) {
                 printf("Error setting group id to %d: %d...\n", job_id + 1000, errno);
             }*/
@@ -409,9 +426,10 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                 printf("PID\tPROCESS\n");  
                 for (j = 0; j< MAX_JOBS; ++j){
                     if (PROCESS_TABLE[j].job_id != INVALID_JOB_ID){
-                        printf("%d\t%s\n", PROCESS_TABLE[j].job_id, PROCESS_TABLE[j].proc);
+                        printf("%d\t%s\n", PROCESS_TABLE[j].pid, PROCESS_TABLE[j].proc);
                     }
                 }
+                printf("Done examining table...\n");
             } else {
                 if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                     perror("shell");
@@ -443,6 +461,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         } while (!WIFEXITED(status) && !WIFSIGNALED(status));    
         /* clean up file descriptors */
         if (fds){
+            printf("Freeing file descriptors...\n");
             free(fds);
         }
         /* clean up jobs table */
