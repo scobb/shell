@@ -21,6 +21,15 @@
 #define INVALID_JOB_ID 0
 #define MAX_JOBS 100
 
+typedef struct Job{
+    int job_id;
+    char* line;
+    struct Job* above;
+    struct Job* below;
+} Job;
+
+Job* JOB_STACK = NULL;
+
 typedef struct Process{
     /* proc name */
     char* proc;
@@ -50,6 +59,8 @@ int shell_execute(char** args);
 int shell_bg(char**);
 int shell_fg(char**);
 int shell_jobs(char**);
+void create_job_entry(int job_id, char* line);
+void remove_job_entry(int job_id);
 
 /* constants */
 int JOB_ID = 1;
@@ -112,6 +123,7 @@ void handle_sigchld(int signum) {
             }
             if (PROCESS_TABLE[i].pid == pid && PROCESS_TABLE[i].job_id != INVALID_JOB_ID){
                 printf("FOUND IT: %s\n", PROCESS_TABLE[i].proc);
+                remove_job_entry(PROCESS_TABLE[i].job_id);
                 PROCESS_TABLE[i].job_id = INVALID_JOB_ID;
                 free(PROCESS_TABLE[i].proc);
                 break;
@@ -152,6 +164,7 @@ void shell_loop() {
         int job_id = JOB_ID++;
         printf("$ ");
         line = shell_read_line(&status);
+        create_job_entry(job_id, line);
         args = shell_split_line(line, &bg);
         pipeline = shell_create_pipeline(args, job_id);
         printf("bg: %d\n", bg);
@@ -164,6 +177,41 @@ void shell_loop() {
         free(line);
         free(args);
 
+    }
+}
+void create_job_entry(int job_id, char* line) {
+    printf("Creating job entry for %s\n", line);
+    Job* j = (Job*)malloc(sizeof(Job));
+    j->job_id= job_id;
+    j->line = (char*)malloc((strlen(line) + 1) * sizeof(char));
+    strcpy(j->line, line);
+    j->below = JOB_STACK;
+    j->above = NULL;
+    if (j->below)
+        j->below->above = j;
+    JOB_STACK = j;
+}
+void remove_job_entry(int job_id) {
+    Job* trav = JOB_STACK;
+    printf("Trying to remove job entry...\n");
+    while (trav) {
+        if (trav->job_id == job_id) {
+            /* found it */
+            printf("Removing job entry for %d\n", job_id);
+            if (trav->above) {
+                if (trav->below)
+                    trav->below->above = trav->above;
+                trav->above->below = trav->below;
+
+            } else {
+                JOB_STACK = trav->below;
+                if (trav->below)
+                    trav->below->above = NULL;
+            }
+            free(trav->line);
+            free(trav);
+        }
+        trav = trav->below;
     }
 }
 
@@ -272,7 +320,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     int i, j, k, table_ind;
     int num_procs = 1;
     int* fds = NULL;
-    int pid, wpid, status, fd;
+    int pid, wpid, status, fd, devnull;
     char* errmsg;
     if (pipeline[0].proc == NULL){
         return 0;
@@ -296,6 +344,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         for (k = 0; k < shell_num_builtins(); ++k) { 
             if (strcmp(BUILTIN_STR[k], pipeline[i].proc) == 0) {
                 printf("Found built-in %s...\n", BUILTIN_STR[k]);
+                remove_job_entry(pipeline[i].job_id);
                 return BUILTIN_FUNC[k](pipeline[i].args);
             }
         } 
@@ -424,7 +473,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                 /*printf("Checking %s for 2>&1\n", pipeline[i].args[j]);*/
                 if (strcmp(pipeline[i].args[j], "2>") == 0){
                     /*printf("FOUND IT\n");*/     
-                    if (dup2(1, 2) == -1) {
+                    if (dup2(pipeline[i].out, 2) == -1) {
                         perror("yash");
                         _exit(1);
                     }
@@ -441,6 +490,13 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
 
             /* execute */
             printf("executing %s\n", pipeline[i].proc);
+            if (bg && pipeline[i].out == STDOUT_FILENO) {
+                pipeline[i].out = open("/dev/null", O_WRONLY);
+                if (dup2(pipeline[i].out, STDOUT_FILENO) == -1) {
+                    perror("yash");
+                    _exit(1);
+                }
+            }
             if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 fprintf(stderr, "yash: %s: command not found\n", pipeline[i].proc);
                 _exit(1);
@@ -480,6 +536,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                 PROCESS_TABLE[i].job_id = INVALID_JOB_ID;
             }
         }
+        remove_job_entry(job_id);
         
     }
 
@@ -528,15 +585,19 @@ int shell_cd(char** args){
     } else {
         if (chdir(args[1]) != 0) {
             perror("yash");
-            _exit(1);
         }
     }
     return 0;
 }
 int shell_jobs(char** args) {
     int j;
-    printf("PID\tPROCESS\n");  
-    for (j = 0; j< MAX_JOBS; ++j){
+    Job* trav = JOB_STACK;
+    printf("JID\tPROCESS\n");  
+    while (trav) {
+        printf("%d\t%s\n", trav->job_id, trav->line);
+        trav = trav->below;
+    }
+/*    for (j = 0; j< MAX_JOBS; ++j){
         if (j < 10) {
             printf("Examining entry at %d: %s with job id %d\n", j, PROCESS_TABLE[j].proc, PROCESS_TABLE[j].job_id);
         }
@@ -544,7 +605,7 @@ int shell_jobs(char** args) {
             printf("%d\t%s\n", PROCESS_TABLE[j].pid, PROCESS_TABLE[j].proc);
         }
     }
-    printf("Done examining table...\n");
+    printf("Done examining table...\n");*/
 }
 
 int shell_fg(char** args) {
