@@ -7,6 +7,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <stddef.h>
+#include <errno.h>
 
 /* definitions */
 #define FINISHED 1
@@ -15,21 +16,25 @@
 #define SHELL_PIPELINE_BUFSIZE 8
 #define SHELL_TOK_DELIM " "
 #define INVALID_DESCRIPTOR -1
-#define FILE_SPECIAL_CHARS 4
+#define TRUE 1
+#define FALSE 0
+#define INVALID_JOB_ID 0
+#define MAX_JOBS 1000
 
 typedef struct Process{
     char* proc;
     char** args;
+    int job_id;
 } Process;
 
 /* forward declarations */
 void shell_loop();
 char* shell_read_line(int* status);
 void handle_signal();
-char** shell_split_line(char* line);
-Process* shell_create_pipeline(char** args);
+char** shell_split_line(char* line, char* bg);
+Process* shell_create_pipeline(char** args, int);
 int shell_cd(char** args);
-int shell_execute_pipeline(Process*);
+int shell_execute_pipeline(Process*, char, int);
 int shell_help(char** args);
 int shell_exit(char** args);
 int shell_num_builtins();
@@ -37,23 +42,17 @@ int shell_execute(char** args);
 
 
 /* constants */
+int JOB_ID = 1;
+Process PROCESS_TABLE[MAX_JOBS];
+
 const char* BUILTIN_STR[] = {
     "cd",
-    "help",
     "exit"
 };
 
 int (*BUILTIN_FUNC[]) (char **) = {
     &shell_cd,
-    &shell_help,
     &shell_exit
-};
-
-const char* SPECIAL_CHARS[FILE_SPECIAL_CHARS] = {
-    "<",
-    ">",
-    "2>",
-    "2>&1",
 };
 
 /* main */
@@ -78,9 +77,22 @@ void allocation_check(void* p) {
 
 /* signal handler */
 void handle_signal(int signum) {
+    int i;
+    char* m;
     if (signum == SIGINT) {
-        printf("GOT SIGINT\n");
-        _exit(0);
+        m = "GOT SIGINT\n";
+        write(1, m, strlen(m));
+        /* _exit(0);*/
+        signal(SIGINT, handle_signal);
+        siginterrupt(SIGINT, 0);
+    }
+}
+void handle_sigchld(int signum) {
+    printf("HANDLER\n");
+    int pid = waitpid((pid_t)(-1), 0, WNOHANG);
+    while (pid > 0) {
+        printf("SIGCHILD pid: %d\n", pid);
+        pid = waitpid((pid_t)(-1), 0, WNOHANG);
     }
 }
 
@@ -94,27 +106,37 @@ void shell_loop() {
 
     /* we'll go until we find eof. */
     int status = 0;
+    char bg;
 
     /* register handler */
     signal(SIGINT, handle_signal);
+    siginterrupt(SIGINT, 0);
+
+    struct sigaction sa;
+    sa.sa_handler = &handle_sigchld;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    if (sigaction(SIGCHLD, &sa, 0) == -1) {
+        perror(0);
+        _exit(1);
+    }
 
     /* loop forever */
     while (status != FINISHED){
+        bg = FALSE;
+        int job_id = JOB_ID++;
         printf("$ ");
         line = shell_read_line(&status);
-        args = shell_split_line(line);
-        pipeline = shell_create_pipeline(args);
-        status |= shell_execute_pipeline(pipeline);
+        args = shell_split_line(line, &bg);
+        pipeline = shell_create_pipeline(args, job_id);
+        printf("bg: %d\n", bg);
+        status |= shell_execute_pipeline(pipeline, bg, job_id);
         /*status |= shell_execute(args);*/
         while (pipeline[i].args != NULL){
-            /*printf("Freeing args for proc %d at %X: %s\n", i, (int)pipeline[i].args, pipeline[i].proc);*/
             free(pipeline[i++].args);
         }
-        /*printf("Freeing pipeline at %X\n", (int)pipeline);*/
         free(pipeline);
-        /*printf("Freeing line at %X\n", (int)line);*/
         free(line);
-        /*printf("Freeing args at %X\n", (int)args);*/
         free(args);
 
     }
@@ -124,7 +146,6 @@ char* shell_read_line(int* status) {
     int bufsize = SHELL_RL_BUFSIZE;
     int position = 0;
     char* buf = (char*)malloc(sizeof(char) * bufsize);
-    /*printf("Allocating line to %X\n", (int)buf);*/
     int c;
     allocation_check(buf); 
 
@@ -145,12 +166,11 @@ char* shell_read_line(int* status) {
     }
 }
 
-char** shell_split_line(char* line){
+char** shell_split_line(char* line, char* bg){
     char* token;
     int bufsize = SHELL_TOK_BUFSIZE;
     int position = 0;
     char** tokens = (char**)malloc(bufsize * sizeof(char*));
-    /*printf("Allocating args to %X\n", (int)tokens);*/
     allocation_check(tokens);
     memset(tokens, 0, bufsize * sizeof(char*));
 
@@ -161,47 +181,52 @@ char** shell_split_line(char* line){
         if (position >= bufsize) {
             bufsize += SHELL_TOK_BUFSIZE;
             tokens = (char**)realloc(tokens, bufsize * sizeof(char*));
-            /*printf("Reallocating args to %X...\n", tokens);*/
             allocation_check(tokens);
             memset(tokens, 0, bufsize * sizeof(char*));
         }
         token = strtok(NULL, SHELL_TOK_DELIM);
     }
+    position = 0;
+    while (tokens[position]) {
+        ++position;
+    }
+    printf("position: %d\n", position);
+    if (position > 0){
+        if (strcmp(tokens[position - 1], "&") == 0) {
+            *bg = TRUE;
+            tokens[position - 1] = NULL;
+        }
+
+    }
     return tokens;
 }
 
-Process* shell_create_pipeline(char** args){
+Process* shell_create_pipeline(char** args, int job_id){
     int i = 0;
     int j = 0;
     int k = 0;
     int offset;
     int bufsize = SHELL_PIPELINE_BUFSIZE;
     Process* pipeline = (Process*)malloc(bufsize * sizeof(Process));
-    /*printf("allocating pipeline at %X\n", pipeline);*/
     allocation_check(pipeline);
     memset(pipeline, 0, bufsize * sizeof(Process));
     while (args[i] != NULL) {
         pipeline[j].proc = args[i];
-
-        /*pipeline[j++] = &args[i];*/
+        pipeline[j].job_id = job_id;
         while (args[i] != NULL && strcmp(args[i], "|") != 0){
             ++i;
         }
-        /*printf("pipline[%d].args: %X\n", j, (int)pipeline[j].args);*/
         pipeline[j].args = (char**) malloc ((i - k + 1) * sizeof(char*));
         allocation_check(pipeline[j].args);
         memset(pipeline[j].args, 0, (i - k + 1) * sizeof(char*));
         offset = k;
-        /*printf("%d args allocated for process %d at %X...\n", (i-k+1), j, (int)pipeline[j].args);*/
         for (; k < i; ++k){
             pipeline[j].args[k - offset] = args[k];
             printf("pipeline[%d].args[%d] = %s\n", j, k-offset, args[k]);
         }
-        /*printf("Writing NULL to pipeline[%d].args[%d] at %X\n", j, k- offset, (int)pipeline[j].args[k]);*/
         pipeline[j].args[k - offset] = NULL;
 
         if (args[i]) {
-            /*printf("Writing NULL to %X\n", (int)args[i]);*/
             args[i++] = NULL;
         }
         ++j;
@@ -215,7 +240,7 @@ Process* shell_create_pipeline(char** args){
     return pipeline;
 }
 
-int shell_execute_pipeline(Process* pipeline){
+int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     int i, j, k;
     int num_procs = 1;
     int* fds;
@@ -237,12 +262,28 @@ int shell_execute_pipeline(Process* pipeline){
             printf("OutputFD: %d\n", *(fds + i * 2 + 1));
         }
     }
+    j=0;
     for (i = 0; i < num_procs; ++i){
         printf("calling fork...\n");
         pid = fork();
         printf("pid is %d\n", pid);
-        if (pid == 0) {
+        if (pid != 0) {
+            /* parent -- insert into process table */
+            j = 0;
+            while (PROCESS_TABLE[j].job_id != INVALID_JOB_ID) {
+                printf("j: %d\n", j);
+                ++j;
+            }
+            printf("Adding table entry for process %s in job %d\n", pipeline[i].proc, pipeline[i].job_id);
+            memcpy(&PROCESS_TABLE[j], &pipeline[i], sizeof(Process));
+        /*    if (setpgid(pid, job_id+1000) == -1) {
+                printf("Error setting group id to %d: %d...\n", job_id + 1000, errno);
+            }*/
+        } else  {
             /* child */
+           /* if (setpgid(getpid(), job_id+1000) == -1) {
+                printf("Error setting group id to %d: %d...\n", job_id + 1000, errno);
+            }*/
             /* piped input */
             printf("Child %d: %s\n", i, pipeline[i].proc);
             if (i > 0){
@@ -260,7 +301,7 @@ int shell_execute_pipeline(Process* pipeline){
                 printf("Closing input fds[%d]: %d\n", i*2, fds[i * 2]);
                 fflush(stdout);
                 close(fds[i * 2]);
-                printf("Child %s piping output fds[%d]: %d...\n", pipeline[i].proc, i*2, fds[i * 2 + 1]);
+                printf("Child %s piping output fds[%d]: %d...\n", pipeline[i].proc, i*2 + 1, fds[i * 2 + 1]);
                 fflush(stdout);
                 if (dup2(fds[i * 2 + 1], 1) == -1) {
                     printf("omg\n");
@@ -271,49 +312,57 @@ int shell_execute_pipeline(Process* pipeline){
             /* file IO -- supercede the piped output */
             j = 0;
             while (pipeline[i].args[j] != NULL){
-                printf("Checking %s for >\n", pipeline[i].args[j]);
+                /*printf("Checking %s for >\n", pipeline[i].args[j]);*/
                 if (strcmp(pipeline[i].args[j], ">") == 0){
-                    printf("FOUND IT\n");
+                    /*printf("FOUND IT\n");*/
                     if (pipeline[i].args[j + 1] != NULL) {
                         fd = open(pipeline[i].args[j+1], O_WRONLY|O_CREAT|O_TRUNC, 0777);
                         if (fd > 0){
                             fchmod(fd, 0644);
                         }
-                        printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);
+                        /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
                         if (dup2(fd, 1) == -1) {
                             perror("shell");
                             _exit(1);
                         }
+                    } else {
+                        errmsg = "shell: syntax error\n";
+                        write(2, errmsg, strlen(errmsg));
+                        _exit(1);
                     }
                     /* stop args here */
                     pipeline[i].args[j] = NULL;
-                    ++j;    
+                    j += 2;
                     continue;
                 }
 
-                printf("Checking %s for 2>\n", pipeline[i].args[j]);
+                /*printf("Checking %s for 2>\n", pipeline[i].args[j]);*/
                 if (strcmp(pipeline[i].args[j], "2>") == 0){
-                    printf("FOUND IT\n");
+                    /*printf("FOUND IT\n");*/
                     if (pipeline[i].args[j + 1] != NULL) {
                         fd = open(pipeline[i].args[j+1], O_WRONLY|O_CREAT|O_TRUNC, 0777);
                         if (fd > 0){
                             fchmod(fd, 0644);
                         }
-                        printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);
+                        /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
                         if (dup2(fd, 2) == -1) {
                             perror("shell");
                             _exit(1);
                         }
+                    } else {
+                        errmsg = "shell: syntax error\n";
+                        write(2, errmsg, strlen(errmsg));
+                        _exit(1);
                     }
                     /* stop args here */
                     pipeline[i].args[j] = NULL;
-                    ++j;    
+                    j += 2;    
                     continue;
                 }
 
-                printf("Checking %s for <\n", pipeline[i].args[j]);
+                /*printf("Checking %s for <\n", pipeline[i].args[j]);*/
                 if (strcmp(pipeline[i].args[j], "<") == 0){
-                    printf("FOUND IT\n");
+                    /*printf("FOUND IT\n");*/
                     if (pipeline[i].args[j + 1] != NULL) {
                         fd = open(pipeline[i].args[j+1], O_RDWR);
                         if (fd < 0){
@@ -321,20 +370,24 @@ int shell_execute_pipeline(Process* pipeline){
                             write(2, errmsg, strlen(errmsg));
                             _exit(1);
                         }
-                        printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);
+                        /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
                         if (dup2(fd, 0) == -1) {
                             perror("shell");
+                            _exit(1);
+                        } else {
+                            errmsg = "shell: syntax error\n";
+                            write(2, errmsg, strlen(errmsg));
                             _exit(1);
                         }
                     }
                     pipeline[i].args[j] = NULL;
-                    ++j;
+                    j+=2;
                     continue;
                 }
 
-                printf("Checking %s for 2>&1\n", pipeline[i].args[j]);
+                /*printf("Checking %s for 2>&1\n", pipeline[i].args[j]);*/
                 if (strcmp(pipeline[i].args[j], "2>") == 0){
-                    printf("FOUND IT\n");     
+                    /*printf("FOUND IT\n");*/     
                     if (dup2(1, 2) == -1) {
                         perror("shell");
                         _exit(1);
@@ -345,25 +398,28 @@ int shell_execute_pipeline(Process* pipeline){
                     ++j;    
                     continue;
                 }
-                
-                /*for (k=0; k < FILE_SPECIAL_CHARS; ++k){
-                    if (strcmp(SPECIAL_CHARS[k], pipeline[i].args[j]) == 0){
 
-                    }
-                }*/
                 ++j;
             }
 
 
             /* execute */
             printf("executing %s\n", pipeline[i].proc);
-            execvp(pipeline[i].proc, pipeline[i].args);
-            if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
-                perror("shell");
-                _exit(1);
-            } else if (pid < 0) {
-                perror("shell");
-                _exit(1);
+            if (strcmp(pipeline[i].proc, "jobs") == 0) {
+                printf("PID\tPROCESS\n");  
+                for (j = 0; j< MAX_JOBS; ++j){
+                    if (PROCESS_TABLE[j].job_id != INVALID_JOB_ID){
+                        printf("%d\t%s\n", PROCESS_TABLE[j].job_id, PROCESS_TABLE[j].proc);
+                    }
+                }
+            } else {
+                if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
+                    perror("shell");
+                    _exit(1);
+                } else if (pid < 0) {
+                    perror("shell");
+                    _exit(1);
+                }
             }
             _exit(0);
         } 
@@ -371,30 +427,35 @@ int shell_execute_pipeline(Process* pipeline){
     }
 
     /* parent code */
-    do {
-        /* wait for very last process in pipeline */
-        /*printf("Waiting... on pid %d\n", pid);
-        wpid = waitpid(pid, &status, WUNTRACED);*/
-        wait(NULL);
-    } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-
-    /* clean up file descriptors */
     printf("File descriptor cleanup...\n");
     for (i = 0; i < (num_procs - 1) * 2; ++i){
         if (close(fds[i]) != 0){
             printf("error closing fds[%d]\n", i);
         }
     }
-/*    if (num_procs > 1){
-        close(fds[0]);
-        close(fds[1]);
-    }*/
-    if (fds){
-        free(fds);
-    }
-    return 0;
+    /* check for & -- do we wait?*/
+    if (!bg) {
+        do {
+            /* wait for very last process in pipeline */
+            /*printf("Waiting... on pid %d\n", pid);
+            wpid = waitpid(pid, &status, WUNTRACED);*/
+            wait(NULL);
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status));    
+        /* clean up file descriptors */
+        if (fds){
+            free(fds);
+        }
+        /* clean up jobs table */
+        for (i = 0; i < MAX_JOBS; ++i){
+            if (PROCESS_TABLE[i].job_id == job_id){
+                printf("Cleaning up process %d\n", i);
+                PROCESS_TABLE[i].job_id = INVALID_JOB_ID;
+            }
+        }
         
+    }
 
+    return 0;
 }
 
 int shell_launch(char** args){
