@@ -19,13 +19,20 @@
 #define TRUE 1
 #define FALSE 0
 #define INVALID_JOB_ID 0
-#define MAX_JOBS 1000
+#define MAX_JOBS 100
 
 typedef struct Process{
+    /* proc name */
     char* proc;
+    /* args */
     char** args;
+    /* ids */
     int job_id;
     int pid;
+    /* file descriptors */
+    int in;
+    int out;
+    int err;
 } Process;
 
 /* forward declarations */
@@ -40,7 +47,9 @@ int shell_help(char** args);
 int shell_exit(char** args);
 int shell_num_builtins();
 int shell_execute(char** args);
-
+int shell_bg(char**);
+int shell_fg(char**);
+int shell_jobs(char**);
 
 /* constants */
 int JOB_ID = 1;
@@ -48,12 +57,16 @@ Process PROCESS_TABLE[MAX_JOBS];
 
 const char* BUILTIN_STR[] = {
     "cd",
-    "exit"
+    "jobs",
+    "fg",
+    "bg"
 };
 
 int (*BUILTIN_FUNC[]) (char **) = {
     &shell_cd,
-    &shell_exit
+    &shell_jobs,
+    &shell_fg,
+    &shell_bg
 };
 
 /* main */
@@ -225,6 +238,9 @@ Process* shell_create_pipeline(char** args, int job_id){
     while (args[i] != NULL) {
         pipeline[j].proc = args[i];
         pipeline[j].job_id = job_id;
+        pipeline[i].in = 0;
+        pipeline[i].out = 1;
+        pipeline[i].err = 2;
         while (args[i] != NULL && strcmp(args[i], "|") != 0){
             ++i;
         }
@@ -277,6 +293,12 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     j=0;
     table_ind = 0;
     for (i = 0; i < num_procs; ++i){
+        for (k = 0; k < shell_num_builtins(); ++k) { 
+            if (strcmp(BUILTIN_STR[k], pipeline[i].proc) == 0) {
+                printf("Found built-in %s...\n", BUILTIN_STR[k]);
+                return BUILTIN_FUNC[k](pipeline[i].args);
+            }
+        } 
         printf("calling fork...\n");
         pid = fork();
         printf("pid is %d\n", pid);
@@ -293,20 +315,15 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             PROCESS_TABLE[table_ind].proc = (char*) malloc((strlen(pipeline[i].proc) + 1) * sizeof(char));
             strcpy(PROCESS_TABLE[table_ind].proc, pipeline[i].proc);
             printf("From the table: %s\n", PROCESS_TABLE[table_ind].proc);
-        /*    if (setpgid(pid, job_id+1000) == -1) {
-                printf("Error setting group id to %d: %d...\n", job_id + 1000, errno);
-            }*/
         } else  {
             /* child */
-           /* if (setpgid(getpid(), job_id+1000) == -1) {
-                printf("Error setting group id to %d: %d...\n", job_id + 1000, errno);
-            }*/
             /* piped input */
             printf("Child %d: %s\n", i, pipeline[i].proc);
             if (i > 0){
-                printf("Child %s piping input fds[%d]: %d...\n", pipeline[i].proc, (i-1)*2, fds[(i - 1) * 2]);
-                if (dup2(fds[(i - 1) * 2], 0) == -1) {
-                    perror("shell");
+                pipeline[i].in = fds[(i - 1) * 2];
+                printf("Child %s piping input fds[%d]: %d...\n", pipeline[i].proc, (i-1)*2, pipeline[i].in);
+                if (dup2(pipeline[i].in, 0) == -1) {
+                    perror("yash");
                     _exit(1);
                 }
                 printf("Closing output fds[%d]: %d\n", (i - 1) * 2 + 1, fds[(i-1)*2+1]);
@@ -315,16 +332,18 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             } 
             /* piped output */
             if (pipeline[i + 1].proc != NULL) {
+                pipeline[i].out = fds[i * 2 + 1];
                 printf("Closing input fds[%d]: %d\n", i*2, fds[i * 2]);
                 fflush(stdout);
                 close(fds[i * 2]);
-                printf("Child %s piping output fds[%d]: %d...\n", pipeline[i].proc, i*2 + 1, fds[i * 2 + 1]);
+                printf("Child %s piping output fds[%d]: %d...\n", pipeline[i].proc, i*2 + 1, pipeline[i].out);
                 fflush(stdout);
                 if (dup2(fds[i * 2 + 1], 1) == -1) {
                     printf("omg\n");
-                    perror("shell");
+                    perror("yash");
                     _exit(1);
                 }
+
             } 
             /* file IO -- supercede the piped output */
             j = 0;
@@ -339,7 +358,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                         }
                         /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
                         if (dup2(fd, 1) == -1) {
-                            perror("shell");
+                            perror("yash");
                             _exit(1);
                         }
                     } else {
@@ -363,7 +382,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                         }
                         /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
                         if (dup2(fd, 2) == -1) {
-                            perror("shell");
+                            perror("yash");
                             _exit(1);
                         }
                     } else {
@@ -389,7 +408,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                         }
                         /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
                         if (dup2(fd, 0) == -1) {
-                            perror("shell");
+                            perror("yash");
                             _exit(1);
                         } else {
                             errmsg = "shell: syntax error\n";
@@ -406,7 +425,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                 if (strcmp(pipeline[i].args[j], "2>") == 0){
                     /*printf("FOUND IT\n");*/     
                     if (dup2(1, 2) == -1) {
-                        perror("shell");
+                        perror("yash");
                         _exit(1);
                     }
 
@@ -422,25 +441,12 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
 
             /* execute */
             printf("executing %s\n", pipeline[i].proc);
-            if (strcmp(pipeline[i].proc, "jobs") == 0) {
-                printf("PID\tPROCESS\n");  
-                for (j = 0; j< MAX_JOBS; ++j){
-                    if (j < 10) {
-                        printf("Examining entry at %d: %s with job id %d\n", j, PROCESS_TABLE[j].proc, PROCESS_TABLE[j].job_id);
-                    }
-                    if (PROCESS_TABLE[j].job_id != INVALID_JOB_ID){
-                        printf("%d\t%s\n", PROCESS_TABLE[j].pid, PROCESS_TABLE[j].proc);
-                    }
-                }
-                printf("Done examining table...\n");
-            } else {
-                if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
-                    perror("shell");
-                    _exit(1);
-                } else if (pid < 0) {
-                    perror("shell");
-                    _exit(1);
-                }
+            if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
+                fprintf(stderr, "yash: %s: command not found\n", pipeline[i].proc);
+                _exit(1);
+            } else if (pid < 0) {
+                perror("yash");
+                _exit(1);
             }
             _exit(0);
         } 
@@ -487,12 +493,12 @@ int shell_launch(char** args){
     if (pid == 0) {
         /* child */
         if (execvp(args[0], args) == -1) {
-            perror("shell");
+            perror("yash");
             _exit(1);
         }
         _exit(1);
     } else if (pid < 0) {
-        perror("shell");
+        perror("yash");
         _exit(1);
 
     } else {
@@ -521,11 +527,31 @@ int shell_cd(char** args){
         fprintf(stderr, "Shell: expected argument to \"cd\"\n");
     } else {
         if (chdir(args[1]) != 0) {
-            perror("shell");
+            perror("yash");
             _exit(1);
         }
     }
     return 0;
+}
+int shell_jobs(char** args) {
+    int j;
+    printf("PID\tPROCESS\n");  
+    for (j = 0; j< MAX_JOBS; ++j){
+        if (j < 10) {
+            printf("Examining entry at %d: %s with job id %d\n", j, PROCESS_TABLE[j].proc, PROCESS_TABLE[j].job_id);
+        }
+        if (PROCESS_TABLE[j].job_id != INVALID_JOB_ID){
+            printf("%d\t%s\n", PROCESS_TABLE[j].pid, PROCESS_TABLE[j].proc);
+        }
+    }
+    printf("Done examining table...\n");
+}
+
+int shell_fg(char** args) {
+
+}
+int shell_bg(char** args) {
+
 }
 
 int shell_help(char** args){
