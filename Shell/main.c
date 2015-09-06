@@ -425,6 +425,9 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             if (strcmp(pipeline[i].proc, "jobs") == 0) {
                 printf("PID\tPROCESS\n");  
                 for (j = 0; j< MAX_JOBS; ++j){
+                    if (j < 10) {
+                        printf("Examining entry at %d: %s with job id %d\n", j, PROCESS_TABLE[j].proc, PROCESS_TABLE[j].job_id);
+                    }
                     if (PROCESS_TABLE[j].job_id != INVALID_JOB_ID){
                         printf("%d\t%s\n", PROCESS_TABLE[j].pid, PROCESS_TABLE[j].proc);
                     }
