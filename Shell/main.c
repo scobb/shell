@@ -13,7 +13,7 @@
 #define FINISHED 1
 #define SHELL_RL_BUFSIZE 2000
 #define SHELL_TOK_BUFSIZE 64
-#define SHELL_PIPELINE_BUFSIZE 8
+#define SHELL_PIPELINE_BUFSIZE 100
 #define SHELL_TOK_DELIM " "
 #define INVALID_DESCRIPTOR -1
 #define TRUE 1
@@ -67,9 +67,9 @@ int shell_bg(char**);
 int shell_fg(char**);
 int shell_jobs(char**);
 void create_job_entry(int job_id, char* line);
-void remove_job_entry(int job_id);
+void remove_job_by_id(int job_id);
 void check_jobs();
-
+Job* remove_job_entry(Job*);
 /* constants */
 int JOB_ID = 1;
 
@@ -215,37 +215,9 @@ void check_jobs() {
     while (trav) {
         if (trav->status == DONE) {
             printf("[%d] %c Done\t%s\n", trav->job_id, plusminus, trav->line);
-            if (trav->above) {
-                if (trav->below)
-                    trav->below->above = trav->above;
-                trav->above->below = trav->below;
-
-            } else {
-                JOB_STACK = trav->below;
-                if (trav->below)
-                    trav->below->above = NULL;
-            }
-            cleanup = trav;
-            trav = trav->below;
-            free(cleanup->line);
-            free(cleanup->fds);
-            free(cleanup);
+            trav = remove_job_entry(trav);
         } else if (trav->status == KILLED) {
-            if (trav->above) {
-                if (trav->below)
-                    trav->below->above = trav->above;
-                trav->above->below = trav->below;
-
-            } else {
-                JOB_STACK = trav->below;
-                if (trav->below)
-                    trav->below->above = NULL;
-            }
-            cleanup = trav;
-            trav = trav->below;
-            free(cleanup->line);
-            free(cleanup->fds);
-            free(cleanup);
+            trav = remove_job_entry(trav);
         } else {
             trav = trav->below;
         }
@@ -253,7 +225,6 @@ void check_jobs() {
     }
 }
 void create_job_entry(int job_id, char* line) {
-    /*printf("Creating job entry for %s\n", line);*/
     Job* j = (Job*)malloc(sizeof(Job));
     j->job_id= job_id;
     j->line = (char*)malloc((strlen(line) + 1) * sizeof(char));
@@ -267,7 +238,7 @@ void create_job_entry(int job_id, char* line) {
         j->below->above = j;
     JOB_STACK = j;
 }
-Job* get_job_entry(int job_id) { 
+Job* get_job_by_id(int job_id) { 
     Job* trav = JOB_STACK;
     while (trav) {
         if (trav->job_id == job_id) {
@@ -276,30 +247,32 @@ Job* get_job_entry(int job_id) {
     }
     return NULL;
 }
-void remove_job_entry(int job_id) {
+void remove_job_by_id(int job_id) {
     Job* trav = JOB_STACK;
-    /*printf("Trying to remove job entry...\n");*/
     while (trav) {
         if (trav->job_id == job_id) {
-            /* found it */
-            /*printf("Removing job entry for %d\n", job_id);*/
-            if (trav->above) {
-                if (trav->below)
-                    trav->below->above = trav->above;
-                trav->above->below = trav->below;
-
-            } else {
-                JOB_STACK = trav->below;
-                if (trav->below)
-                    trav->below->above = NULL;
-            }
-            free(trav->line);
-            /*free(trav->fds);*/
-            free(trav);
+            remove_job_entry(trav);
             break;
         }
         trav = trav->below;
     }
+}
+
+Job* remove_job_entry(Job* j) {
+    if (j->above) {
+        if (j->below)
+            j->below->above = j->above;
+        j->above->below = j->below;
+
+    } else {
+        JOB_STACK = j->below;
+        if (j->below)
+            j->below->above = NULL;
+    }
+    Job* ret = j->below;
+    free(j->line);
+    free(j);
+    return ret;
 }
 
 char* shell_read_line(int* status) {
@@ -385,7 +358,6 @@ Process* shell_create_pipeline(char** args, int job_id){
         offset = k;
         for (; k < i; ++k){
             pipeline[j].args[k - offset] = args[k];
-            /*printf("pipeline[%d].args[%d] = %s\n", j, k-offset, args[k]);*/
         }
         pipeline[j].args[k - offset] = NULL;
 
@@ -396,10 +368,6 @@ Process* shell_create_pipeline(char** args, int job_id){
         ++k;
     }
     pipeline[j].proc = NULL;
-    /*i = 0;
-    while (pipeline[i].proc != NULL){
-        printf("%s\n", pipeline[i++].proc);
-    }*/
     return pipeline;
 }
 
@@ -411,7 +379,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     char* errmsg;
     group = -1;
     if (pipeline[0].proc == NULL){
-        remove_job_entry(job_id);
+        remove_job_by_id(job_id);
         return 0;
     }
 
@@ -433,7 +401,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         for (k = 0; k < shell_num_builtins(); ++k) { 
             if (strcmp(BUILTIN_STR[k], pipeline[i].proc) == 0) {
                 /*printf("Found built-in %s...\n", BUILTIN_STR[k]);*/
-                remove_job_entry(pipeline[i].job_id);
+                remove_job_by_id(pipeline[i].job_id);
                 return BUILTIN_FUNC[k](pipeline[i].args);
             }
         } 
@@ -449,38 +417,35 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                 perror("yash");
                 _exit(1);
             } 
-            Job* trav = get_job_entry(job_id);
+            Job* trav = get_job_by_id(job_id);
             if (!trav->pid) {
                 trav->pid = pid;
             }
             pipeline[i].pid = pid;
         } else  {
             /* child */
-            /* piped input */
-            /*printf("Child %d: %s\n", i, pipeline[i].proc);*/
+            /* close any earlier FDs */
             for (j = 0; j < (i-1) * 2; ++j) {
-                /*printf("Closing fds[%d]: %d\n", j, fds[j]);*/
+                /*printf("Child %s closing fds[%d]: %d\n", pipeline[i].proc, j, fds[j]);*/
                 close(fds[j]);
             }
+            for (j = i*2+2; j < (num_procs - 1) * 2; ++j) {
+                /*printf("Child %s closing fds[%d]: %d\n", pipeline[i].proc, j, fds[j]);*/
+                close(fds[j]);
+            }
+            /* piped input */
             if (i > 0){
                 pipeline[i].in = fds[(i - 1) * 2];
-                /*printf("Child %s piping input fds[%d]: %d...\n", pipeline[i].proc, (i-1)*2, pipeline[i].in);*/
                 if (dup2(pipeline[i].in, 0) == -1) {
                     perror("yash");
                     _exit(1);
                 }
-                /*printf("Closing output fds[%d]: %d\n", (i - 1) * 2 + 1, fds[(i-1)*2+1]);
-                fflush(stdout);*/
                 close(fds[(i - 1) * 2 + 1]);
             } 
             /* piped output */
             if (pipeline[i + 1].proc != NULL) {
                 pipeline[i].out = fds[i * 2 + 1];
-                /*printf("Closing input fds[%d]: %d\n", i*2, fds[i * 2]);
-                fflush(stdout);*/
                 close(fds[i * 2]);
-                /*printf("Child %s piping output fds[%d]: %d...\n", pipeline[i].proc, i*2 + 1, pipeline[i].out);
-                fflush(stdout);*/
                 if (dup2(fds[i * 2 + 1], 1) == -1) {
                     perror("yash");
                     _exit(1);
@@ -490,15 +455,13 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             /* file IO -- supercede the piped output */
             j = 0;
             while (pipeline[i].args[j] != NULL){
-                /*printf("Checking %s for >\n", pipeline[i].args[j]);*/
                 if (strcmp(pipeline[i].args[j], ">") == 0){
-                    /*printf("FOUND IT\n");*/
                     if (pipeline[i].args[j + 1] != NULL) {
                         fd = open(pipeline[i].args[j+1], O_WRONLY|O_CREAT|O_TRUNC, 0777);
+                        /* update permissions */
                         if (fd > 0){
                             fchmod(fd, 0644);
                         }
-                        /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
                         if (pipeline[i].err == pipeline[i].out) {
                             pipeline[i].err = fd;
                             if (dup2(fd, STDERR_FILENO) == -1) {
@@ -522,15 +485,12 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                     continue;
                 }
 
-                /*printf("Checking %s for 2>\n", pipeline[i].args[j]);*/
                 if (strcmp(pipeline[i].args[j], "2>") == 0){
-                    /*printf("FOUND IT\n");*/
                     if (pipeline[i].args[j + 1] != NULL) {
                         fd = open(pipeline[i].args[j+1], O_WRONLY|O_CREAT|O_TRUNC, 0777);
                         if (fd > 0){
                             fchmod(fd, 0644);
                         }
-                        /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
                         pipeline[i].err = fd;
                         if (dup2(fd, STDERR_FILENO) == -1) {
                             perror("yash");
@@ -547,9 +507,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                     continue;
                 }
 
-                /*printf("Checking %s for <\n", pipeline[i].args[j]);*/
                 if (strcmp(pipeline[i].args[j], "<") == 0){
-                    /*printf("FOUND IT\n");*/
                     if (pipeline[i].args[j + 1] != NULL) {
                         fd = open(pipeline[i].args[j+1], O_RDWR);
                         if (fd < 0){
@@ -558,7 +516,6 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                             _exit(1);
                         }
                         pipeline[i].in = fd;
-                        /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
                         if (dup2(fd, STDIN_FILENO) == -1) {
                             perror("yash");
                             _exit(1);
@@ -573,9 +530,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                     continue;
                 }
 
-                /*printf("Checking %s for 2>&1\n", pipeline[i].args[j]);*/
                 if (strcmp(pipeline[i].args[j], "2>&1") == 0){
-                    /*printf("FOUND IT\n");*/     
                     pipeline[i].err = pipeline[i].out;
                     if (dup2(pipeline[i].out, STDERR_FILENO) == -1) {
                         perror("yash");
@@ -593,7 +548,6 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
 
 
             /* execute */
-            /*printf("executing %s\n", pipeline[i].proc);*/
             if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 fprintf(stderr, "yash: %s: command not found\n", pipeline[i].proc);
                 _exit(1);
@@ -607,7 +561,6 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     }
 
     /* parent code */
-    /*printf("File descriptor cleanup...\n");*/
     for (i = 0; i < (num_procs - 1) * 2; ++i){
         if (close(fds[i]) != 0){
             printf("error closing fds[%d]\n", i);
@@ -615,7 +568,6 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     }
     /* clean up file descriptors */
     if (fds){
-        /*printf("Freeing file descriptors...\n");*/
         free(fds);
     }
     /* check for & -- do we wait?*/
@@ -623,18 +575,17 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         do {
             /* wait for last in pipeline to finish */
             wpid = waitpid(pid, &status, 0);
-            /* wait(&status); */
             if (WIFSTOPPED(status)) {
-                Job* j = get_job_entry(job_id);
+                Job* j = get_job_by_id(job_id);
                 j->status = STOPPED;
                 return 0;
             }
         } while (!WIFEXITED(status) && !WIFSIGNALED(status) && !WIFSIGNALED(status));    
         /* clean up jobs table */
-        remove_job_entry(job_id);
+        remove_job_by_id(job_id);
         
     } else {
-        Job* j = get_job_entry(job_id);
+        Job* j = get_job_by_id(job_id);
         j->status = BACKGROUND;
     }
 
@@ -685,7 +636,7 @@ int shell_fg(char** args) {
                     return 0;
                 }
             } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-            remove_job_entry(trav->job_id);
+            remove_job_by_id(trav->job_id);
         }
         plusminus = '-';
         trav = trav->below;
