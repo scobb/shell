@@ -161,8 +161,7 @@ void shell_loop() {
     int status = 0;
     char bg;
 
-    /* register handler */
-
+    /* register handlers */
     sa.sa_handler = &handle_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
@@ -199,6 +198,7 @@ void shell_loop() {
         args = shell_split_line(line, &bg);
         pipeline = shell_create_pipeline(args, job_id);
         status |= shell_execute_pipeline(pipeline, bg, job_id);
+        i = 0;
         while (pipeline[i].args != NULL){
             free(pipeline[i++].args);
         }
@@ -296,6 +296,7 @@ void remove_job_entry(int job_id) {
             free(trav->line);
             /*free(trav->fds);*/
             free(trav);
+            break;
         }
         trav = trav->below;
     }
