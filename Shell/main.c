@@ -20,12 +20,17 @@
 #define FALSE 0
 #define INVALID_JOB_ID 0
 #define MAX_JOBS 100
+#define BACKGROUND 2
+#define RUNNING 1
+#define STOPPED 0
 
 typedef struct Job{
     int job_id;
     char* line;
     struct Job* above;
     struct Job* below;
+    int status;
+    int pid;
 } Job;
 
 Job* JOB_STACK = NULL;
@@ -187,9 +192,19 @@ void create_job_entry(int job_id, char* line) {
     strcpy(j->line, line);
     j->below = JOB_STACK;
     j->above = NULL;
+    j->status = RUNNING;
     if (j->below)
         j->below->above = j;
     JOB_STACK = j;
+}
+Job* get_job_entry(int job_id) { 
+    Job* trav = JOB_STACK;
+    while (trav) {
+        if (trav->job_id == job_id) {
+            return trav;
+        }
+    }
+    return NULL;
 }
 void remove_job_entry(int job_id) {
     Job* trav = JOB_STACK;
@@ -354,6 +369,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         if (pid != 0) {
             /* parent -- insert into process table */
             j = 0;
+            get_job_entry(job_id)->pid = pid;
             pipeline[i].pid = pid;
             while (PROCESS_TABLE[table_ind].job_id != INVALID_JOB_ID) {
                 printf("table_ind: %d: %s\n", table_ind, PROCESS_TABLE[table_ind].proc);
@@ -538,6 +554,8 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         }
         remove_job_entry(job_id);
         
+    } else {
+        get_job_entry(job_id)->status = BACKGROUND;
     }
 
     return 0;
@@ -592,23 +610,40 @@ int shell_cd(char** args){
 int shell_jobs(char** args) {
     int j;
     Job* trav = JOB_STACK;
-    printf("JID\tPROCESS\n");  
+    char plusminus = '+';
+    char* running = "Running";
+    char* stopped = "Stopped";
     while (trav) {
-        printf("%d\t%s\n", trav->job_id, trav->line);
+        if (trav->status) {
+            printf("[%d] %c %s\t%s\n", trav->job_id, plusminus, running, trav->line);
+        } else {
+            printf("[%d] %c %s\t%s\n", trav->job_id, plusminus, stopped, trav->line);
+        }
         trav = trav->below;
+        plusminus = '-';
     }
-/*    for (j = 0; j< MAX_JOBS; ++j){
-        if (j < 10) {
-            printf("Examining entry at %d: %s with job id %d\n", j, PROCESS_TABLE[j].proc, PROCESS_TABLE[j].job_id);
-        }
-        if (PROCESS_TABLE[j].job_id != INVALID_JOB_ID){
-            printf("%d\t%s\n", PROCESS_TABLE[j].pid, PROCESS_TABLE[j].proc);
-        }
-    }
-    printf("Done examining table...\n");*/
 }
 
 int shell_fg(char** args) {
+    Job* trav = JOB_STACK;
+    int i, wpid, status;
+    char plusminus = '+';
+    printf("shell_fg...\n");
+    while (trav) {
+        printf("trav->status: %d\n", trav->status);
+        if (trav->status == BACKGROUND) {
+            trav->status = RUNNING;
+            printf("sending sigcont\n");
+            kill(trav->pid, SIGCONT);
+            printf("[%d] %c %s\t%s\n", trav->job_id, plusminus, "Running", trav->line);
+            do {
+                wpid = waitpid(trav->pid, &status, WUNTRACED);
+            } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+            remove_job_entry(trav->job_id);
+        }
+        plusminus = '-';
+        trav = trav->below;
+    }
 
 }
 int shell_bg(char** args) {
