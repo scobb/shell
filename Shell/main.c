@@ -192,9 +192,7 @@ void shell_loop() {
         create_job_entry(job_id, line);
         args = shell_split_line(line, &bg);
         pipeline = shell_create_pipeline(args, job_id);
-        printf("bg: %d\n", bg);
         status |= shell_execute_pipeline(pipeline, bg, job_id);
-        /*status |= shell_execute(args);*/
         while (pipeline[i].args != NULL){
             free(pipeline[i++].args);
         }
@@ -444,7 +442,15 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                             fchmod(fd, 0644);
                         }
                         /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
-                        if (dup2(fd, 1) == -1) {
+                        if (pipeline[i].err == pipeline[i].out) {
+                            pipeline[i].err = fd;
+                            if (dup2(fd, STDERR_FILENO) == -1) {
+                                perror("yash");
+                                _exit(1);
+                            }
+                        }
+                        pipeline[i].out = fd;
+                        if (dup2(fd, STDOUT_FILENO) == -1) {
                             perror("yash");
                             _exit(1);
                         }
@@ -468,7 +474,8 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                             fchmod(fd, 0644);
                         }
                         /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
-                        if (dup2(fd, 2) == -1) {
+                        pipeline[i].err = fd;
+                        if (dup2(fd, STDERR_FILENO) == -1) {
                             perror("yash");
                             _exit(1);
                         }
@@ -493,8 +500,9 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                             write(2, errmsg, strlen(errmsg));
                             _exit(1);
                         }
+                        pipeline[i].in = fd;
                         /*printf("Created redirect fd %d for file %s\n", fd, pipeline[i].args[j+1]);*/
-                        if (dup2(fd, 0) == -1) {
+                        if (dup2(fd, STDIN_FILENO) == -1) {
                             perror("yash");
                             _exit(1);
                         } else {
@@ -509,9 +517,10 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                 }
 
                 /*printf("Checking %s for 2>&1\n", pipeline[i].args[j]);*/
-                if (strcmp(pipeline[i].args[j], "2>") == 0){
+                if (strcmp(pipeline[i].args[j], "2>&1") == 0){
                     /*printf("FOUND IT\n");*/     
-                    if (dup2(pipeline[i].out, 2) == -1) {
+                    pipeline[i].err = pipeline[i].out;
+                    if (dup2(pipeline[i].out, STDERR_FILENO) == -1) {
                         perror("yash");
                         _exit(1);
                     }
@@ -557,12 +566,9 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     /* check for & -- do we wait?*/
     if (!bg) {
         do {
-            /* wait for very last process in pipeline */
-            /*printf("Waiting... on pid %d\n", pid);
-            wpid = waitpid(pid, &status, WUNTRACED);*/
+            /* wait for any process to finish */
             wpid = waitpid(-1, &status, WUNTRACED);
             /* wait(&status); */
-            printf("popped out here...\n");
             if (WIFSTOPPED(status)) {
                 Job* j = get_job_entry(job_id);
                 j->status = STOPPED;
