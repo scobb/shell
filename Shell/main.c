@@ -23,6 +23,8 @@
 #define BACKGROUND 2
 #define RUNNING 1
 #define STOPPED 0
+#define DONE -1
+#define KILLED -2
 
 typedef struct Job{
     int job_id;
@@ -61,16 +63,15 @@ int shell_execute_pipeline(Process*, char, int);
 int shell_help(char** args);
 int shell_exit(char** args);
 int shell_num_builtins();
-int shell_execute(char** args);
 int shell_bg(char**);
 int shell_fg(char**);
 int shell_jobs(char**);
 void create_job_entry(int job_id, char* line);
 void remove_job_entry(int job_id);
+void check_jobs();
 
 /* constants */
 int JOB_ID = 1;
-Process PROCESS_TABLE[MAX_JOBS];
 
 const char* BUILTIN_STR[] = {
     "cd",
@@ -108,30 +109,31 @@ void allocation_check(void* p) {
 
 /* signal handler */
 void handle_signal(int signum) {
-    int i;
-    char* m;
-    if (signum == SIGINT) {
-        /* _exit(0);*/
-        signal(SIGINT, handle_signal);
-        siginterrupt(SIGINT, 0);
+    Job* trav = JOB_STACK;
+    while (trav) {
+        if (trav->status == RUNNING){
+            fflush(stdout);
+            trav->status = KILLED;
+            kill(trav->pid, SIGINT);
+            break;
+        }
+        trav = trav->below;
     }
 }
+
 void handle_sigchld(int signum) {
     int i;
+    Job* j = JOB_STACK;
     int pid = waitpid((pid_t)(-1), 0, WNOHANG);
+    printf("sigchild for pid %d\n", pid);
     while (pid > 0) {
-        printf("SIGCHILD pid: %d\n", pid);
-        for (i = 0; i < MAX_JOBS; ++i){
-            if (i < 10) {
-                printf("PROCESS_TABLE[%d].pid: %d\n", i, PROCESS_TABLE[i].pid);
-            }
-            if (PROCESS_TABLE[i].pid == pid && PROCESS_TABLE[i].job_id != INVALID_JOB_ID){
-                printf("FOUND IT: %s\n", PROCESS_TABLE[i].proc);
-                remove_job_entry(PROCESS_TABLE[i].job_id);
-                PROCESS_TABLE[i].job_id = INVALID_JOB_ID;
-                free(PROCESS_TABLE[i].proc);
+        while (j) {
+            if (j->pid == pid) {
+                printf("Marking %s done...\n", j->line);
+                j->status = DONE;
                 break;
             }
+            j = j->below;
         }
         pid = waitpid((pid_t)(-1), 0, WNOHANG);
     }
@@ -139,20 +141,15 @@ void handle_sigchld(int signum) {
 
 void handle_sigtstp(int signum) {
     Job* trav = JOB_STACK;
-    char plusminus = '+';
-    printf("Handling sgtstp\n");
     while (trav) {
-        printf("trav->status: %d\n", trav->status);
         if (trav->status == RUNNING){
-            printf("[%d] %c Stopped\t%s\n", trav->job_id, plusminus, trav->line);
             fflush(stdout);
+            trav->status = KILLED;
+            kill(trav->pid, SIGTSTP);
             break;
-        } 
+        }
         trav = trav->below;
-        plusminus = '-';
     }
-    signal(SIGTSTP, handle_sigtstp);
-    siginterrupt(SIGTSTP, 0);
 }
 
 /* primary functionality -- shell loop */
@@ -162,19 +159,30 @@ void shell_loop() {
     char* line;
     char** args;
     Process* pipeline;
+    struct sigaction sa;
 
     /* we'll go until we find eof. */
     int status = 0;
     char bg;
 
     /* register handler */
-    signal(SIGINT, handle_signal);
-    siginterrupt(SIGINT, 0);
 
-    signal(SIGTSTP, handle_sigtstp);
-    siginterrupt(SIGTSTP, 0);
+    sa.sa_handler = &handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGINT, &sa, 0) == -1) {
+        perror(0);
+        _exit(1);
+    }
 
-    struct sigaction sa;
+    sa.sa_handler = &handle_sigtstp;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGTSTP, &sa, 0) == -1) {
+        perror(0);
+        _exit(1);
+    }
+
     sa.sa_handler = &handle_sigchld;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
@@ -189,6 +197,7 @@ void shell_loop() {
         int job_id = JOB_ID++;
         printf("$ ");
         line = shell_read_line(&status);
+        check_jobs();
         create_job_entry(job_id, line);
         args = shell_split_line(line, &bg);
         pipeline = shell_create_pipeline(args, job_id);
@@ -202,6 +211,50 @@ void shell_loop() {
 
     }
 }
+void check_jobs() {
+    Job* cleanup;
+    Job* trav = JOB_STACK;
+    char plusminus = '+';
+    while (trav) {
+        if (trav->status == DONE) {
+            printf("[%d] %c Done\t%s\n", trav->job_id, plusminus, trav->line);
+            if (trav->above) {
+                if (trav->below)
+                    trav->below->above = trav->above;
+                trav->above->below = trav->below;
+
+            } else {
+                JOB_STACK = trav->below;
+                if (trav->below)
+                    trav->below->above = NULL;
+            }
+            cleanup = trav;
+            trav = trav->below;
+            free(cleanup->line);
+            free(cleanup->fds);
+            free(cleanup);
+        } else if (trav->status == KILLED) {
+            if (trav->above) {
+                if (trav->below)
+                    trav->below->above = trav->above;
+                trav->above->below = trav->below;
+
+            } else {
+                JOB_STACK = trav->below;
+                if (trav->below)
+                    trav->below->above = NULL;
+            }
+            cleanup = trav;
+            trav = trav->below;
+            free(cleanup->line);
+            free(cleanup->fds);
+            free(cleanup);
+        } else {
+            trav = trav->below;
+        }
+        plusminus = '-';
+    }
+}
 void create_job_entry(int job_id, char* line) {
     printf("Creating job entry for %s\n", line);
     Job* j = (Job*)malloc(sizeof(Job));
@@ -212,6 +265,7 @@ void create_job_entry(int job_id, char* line) {
     j->above = NULL;
     j->status = RUNNING;
     j->fds = NULL;
+    j->pid = 0;
     if (j->below)
         j->below->above = j;
     JOB_STACK = j;
@@ -243,7 +297,7 @@ void remove_job_entry(int job_id) {
                     trav->below->above = NULL;
             }
             free(trav->line);
-            free(trav->fds);
+            /*free(trav->fds);*/
             free(trav);
         }
         trav = trav->below;
@@ -355,8 +409,9 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     int i, j, k, table_ind;
     int num_procs = 1;
     int* fds = NULL;
-    int pid, wpid, status, fd, devnull;
+    int pid, wpid, status, fd, group;
     char* errmsg;
+    group = -1;
     if (pipeline[0].proc == NULL){
         return 0;
     }
@@ -388,18 +443,20 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         printf("pid is %d\n", pid);
         if (pid != 0) {
             /* parent -- insert into process table */
-            j = 0;
-            get_job_entry(job_id)->pid = pid;
-            pipeline[i].pid = pid;
-            while (PROCESS_TABLE[table_ind].job_id != INVALID_JOB_ID) {
-                printf("table_ind: %d: %s\n", table_ind, PROCESS_TABLE[table_ind].proc);
-                ++table_ind;
+            if (group == -1){
+                group = pid;
             }
-            printf("Adding table entry for process %s in job %d at entry %d\n", pipeline[i].proc, pipeline[i].job_id, table_ind);
-            memcpy(&PROCESS_TABLE[table_ind], &pipeline[i], sizeof(Process));
-            PROCESS_TABLE[table_ind].proc = (char*) malloc((strlen(pipeline[i].proc) + 1) * sizeof(char));
-            strcpy(PROCESS_TABLE[table_ind].proc, pipeline[i].proc);
-            printf("From the table: %s\n", PROCESS_TABLE[table_ind].proc);
+            j = 0;
+            Job* j = get_job_entry(job_id);
+            if (!j->pid) {
+                j->pid = pid;
+            }
+            if (setpgid(pid, group) != 0) {
+                printf("OMG ERROR ========%d========\n", errno);
+            } else {
+                printf("Group successfully set to %d...\n", group);
+            }
+            pipeline[i].pid = pid;
         } else  {
             /* child */
             /* piped input */
@@ -537,13 +594,6 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
 
             /* execute */
             printf("executing %s\n", pipeline[i].proc);
-            if (bg && pipeline[i].out == STDOUT_FILENO) {
-                pipeline[i].out = open("/dev/null", O_WRONLY);
-                if (dup2(pipeline[i].out, STDOUT_FILENO) == -1) {
-                    perror("yash");
-                    _exit(1);
-                }
-            }
             if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 fprintf(stderr, "yash: %s: command not found\n", pipeline[i].proc);
                 _exit(1);
@@ -563,6 +613,11 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             printf("error closing fds[%d]\n", i);
         }
     }
+    /* clean up file descriptors */
+    if (fds){
+        printf("Freeing file descriptors...\n");
+        free(fds);
+    }
     /* check for & -- do we wait?*/
     if (!bg) {
         do {
@@ -572,67 +627,18 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             if (WIFSTOPPED(status)) {
                 Job* j = get_job_entry(job_id);
                 j->status = STOPPED;
-                j->fds = fds;
                 return 0;
             }
         } while (!WIFEXITED(status) && !WIFSIGNALED(status) && !WIFSIGNALED(status));    
-        /* clean up file descriptors */
-        if (fds){
-            printf("Freeing file descriptors...\n");
-            free(fds);
-        }
         /* clean up jobs table */
-        for (i = 0; i < MAX_JOBS; ++i){
-            if (PROCESS_TABLE[i].job_id == job_id){
-                printf("Cleaning up process %d\n", i);
-                PROCESS_TABLE[i].job_id = INVALID_JOB_ID;
-            }
-        }
         remove_job_entry(job_id);
         
     } else {
         Job* j = get_job_entry(job_id);
         j->status = BACKGROUND;
-        j->fds = fds;
     }
 
     return 0;
-}
-
-int shell_launch(char** args){
-    int pid, wpid;
-    int status;
-    pid = fork();
-    if (pid == 0) {
-        /* child */
-        if (execvp(args[0], args) == -1) {
-            perror("yash");
-            _exit(1);
-        }
-        _exit(1);
-    } else if (pid < 0) {
-        perror("yash");
-        _exit(1);
-
-    } else {
-        do {
-            wpid = waitpid(pid, &status, WUNTRACED);
-        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-    }
-    return 0;
-}
-
-int shell_execute(char** args){
-    int i = 0;
-    if (args[0] == NULL) {
-        return 0;
-    }
-    for (i = 0; i < shell_num_builtins(); ++i){
-        if (strcmp(args[0], BUILTIN_STR[i]) == 0) {
-            return (*BUILTIN_FUNC[i])(args);
-        }
-    }
-    return shell_launch(args);
 }
 
 int shell_cd(char** args){
@@ -669,13 +675,21 @@ int shell_fg(char** args) {
     printf("shell_fg...\n");
     while (trav) {
         printf("trav->status: %d\n", trav->status);
-        if (trav->status == BACKGROUND) {
+        if (trav->status == BACKGROUND || trav->status == STOPPED) {
             trav->status = RUNNING;
-            printf("sending sigcont\n");
+            printf("sending sigcont to pid %d\n", trav->pid);
             kill(trav->pid, SIGCONT);
             printf("%s\n", trav->line);
+            fflush(stdout);
             do {
+                printf("Calling wait...");
+                fflush(stdout);
                 wpid = waitpid(trav->pid, &status, WUNTRACED);
+                printf("%d\n", wpid);
+                if (WIFSTOPPED(status)) {
+                    trav->status = STOPPED;
+                    return 0;
+                }
             } while (!WIFEXITED(status) && !WIFSIGNALED(status));
             remove_job_entry(trav->job_id);
         }
@@ -685,6 +699,20 @@ int shell_fg(char** args) {
 
 }
 int shell_bg(char** args) {
+    Job* trav = JOB_STACK;
+    int i, wpid, status;
+    printf("shell_bg...\n");
+    while (trav) {
+        printf("trav->status: %d\n", trav->status);
+        if (trav->status == BACKGROUND || trav->status == STOPPED) {
+            trav->status = RUNNING;
+            printf("sending sigcont to pid %d\n", trav->pid);
+            kill(trav->pid, SIGCONT);
+            printf("%s\n", trav->line);
+            fflush(stdout);
+        }
+        trav = trav->below;
+    }
 
 }
 
