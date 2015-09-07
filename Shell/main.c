@@ -31,6 +31,7 @@ typedef struct Job{
     struct Job* below;
     int status;
     int pid;
+    int* fds;
 } Job;
 
 Job* JOB_STACK = NULL;
@@ -110,8 +111,6 @@ void handle_signal(int signum) {
     int i;
     char* m;
     if (signum == SIGINT) {
-        m = "GOT SIGINT\n";
-        write(1, m, strlen(m));
         /* _exit(0);*/
         signal(SIGINT, handle_signal);
         siginterrupt(SIGINT, 0);
@@ -138,6 +137,24 @@ void handle_sigchld(int signum) {
     }
 }
 
+void handle_sigtstp(int signum) {
+    Job* trav = JOB_STACK;
+    char plusminus = '+';
+    printf("Handling sgtstp\n");
+    while (trav) {
+        printf("trav->status: %d\n", trav->status);
+        if (trav->status == RUNNING){
+            printf("[%d] %c Stopped\t%s\n", trav->job_id, plusminus, trav->line);
+            fflush(stdout);
+            break;
+        } 
+        trav = trav->below;
+        plusminus = '-';
+    }
+    signal(SIGTSTP, handle_sigtstp);
+    siginterrupt(SIGTSTP, 0);
+}
+
 /* primary functionality -- shell loop */
 void shell_loop() {
     /* local vars for parsing */
@@ -153,6 +170,9 @@ void shell_loop() {
     /* register handler */
     signal(SIGINT, handle_signal);
     siginterrupt(SIGINT, 0);
+
+    signal(SIGTSTP, handle_sigtstp);
+    siginterrupt(SIGTSTP, 0);
 
     struct sigaction sa;
     sa.sa_handler = &handle_sigchld;
@@ -193,6 +213,7 @@ void create_job_entry(int job_id, char* line) {
     j->below = JOB_STACK;
     j->above = NULL;
     j->status = RUNNING;
+    j->fds = NULL;
     if (j->below)
         j->below->above = j;
     JOB_STACK = j;
@@ -224,6 +245,7 @@ void remove_job_entry(int job_id) {
                     trav->below->above = NULL;
             }
             free(trav->line);
+            free(trav->fds);
             free(trav);
         }
         trav = trav->below;
@@ -538,8 +560,16 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             /* wait for very last process in pipeline */
             /*printf("Waiting... on pid %d\n", pid);
             wpid = waitpid(pid, &status, WUNTRACED);*/
-            wait(NULL);
-        } while (!WIFEXITED(status) && !WIFSIGNALED(status));    
+            wpid = waitpid(-1, &status, WUNTRACED);
+            /* wait(&status); */
+            printf("popped out here...\n");
+            if (WIFSTOPPED(status)) {
+                Job* j = get_job_entry(job_id);
+                j->status = STOPPED;
+                j->fds = fds;
+                return 0;
+            }
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status) && !WIFSIGNALED(status));    
         /* clean up file descriptors */
         if (fds){
             printf("Freeing file descriptors...\n");
@@ -555,7 +585,9 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
         remove_job_entry(job_id);
         
     } else {
-        get_job_entry(job_id)->status = BACKGROUND;
+        Job* j = get_job_entry(job_id);
+        j->status = BACKGROUND;
+        j->fds = fds;
     }
 
     return 0;
@@ -635,7 +667,7 @@ int shell_fg(char** args) {
             trav->status = RUNNING;
             printf("sending sigcont\n");
             kill(trav->pid, SIGCONT);
-            printf("[%d] %c %s\t%s\n", trav->job_id, plusminus, "Running", trav->line);
+            printf("%s\n", trav->line);
             do {
                 wpid = waitpid(trav->pid, &status, WUNTRACED);
             } while (!WIFEXITED(status) && !WIFSIGNALED(status));
