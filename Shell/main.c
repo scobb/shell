@@ -458,6 +458,10 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             /* child */
             /* piped input */
             /*printf("Child %d: %s\n", i, pipeline[i].proc);*/
+            for (j = 0; j < (i-1) * 2; ++j) {
+                /*printf("Closing fds[%d]: %d\n", j, fds[j]);*/
+                close(fds[j]);
+            }
             if (i > 0){
                 pipeline[i].in = fds[(i - 1) * 2];
                 /*printf("Child %s piping input fds[%d]: %d...\n", pipeline[i].proc, (i-1)*2, pipeline[i].in);*/
@@ -478,7 +482,6 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
                 /*printf("Child %s piping output fds[%d]: %d...\n", pipeline[i].proc, i*2 + 1, pipeline[i].out);
                 fflush(stdout);*/
                 if (dup2(fds[i * 2 + 1], 1) == -1) {
-                    printf("omg\n");
                     perror("yash");
                     _exit(1);
                 }
