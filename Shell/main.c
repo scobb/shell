@@ -102,7 +102,7 @@ int shell_num_builtins() {
 /* allocation check */
 void allocation_check(void* p) {
     if (!p) {
-        fprintf(stderr, "Shell: allocation error\n");
+        fprintf(stderr, "yash: allocation error\n");
         _exit(1);
     }
 }
@@ -112,7 +112,6 @@ void handle_signal(int signum) {
     Job* trav = JOB_STACK;
     while (trav) {
         if (trav->status == RUNNING){
-            fflush(stdout);
             trav->status = KILLED;
             kill(trav->pid, SIGINT);
             break;
@@ -125,11 +124,9 @@ void handle_sigchld(int signum) {
     int i;
     Job* j = JOB_STACK;
     int pid = waitpid((pid_t)(-1), 0, WNOHANG);
-    printf("sigchild for pid %d\n", pid);
     while (pid > 0) {
         while (j) {
             if (j->pid == pid) {
-                printf("Marking %s done...\n", j->line);
                 j->status = DONE;
                 break;
             }
@@ -143,7 +140,6 @@ void handle_sigtstp(int signum) {
     Job* trav = JOB_STACK;
     while (trav) {
         if (trav->status == RUNNING){
-            fflush(stdout);
             trav->status = KILLED;
             kill(trav->pid, SIGTSTP);
             break;
@@ -195,6 +191,7 @@ void shell_loop() {
     while (status != FINISHED){
         bg = FALSE;
         int job_id = JOB_ID++;
+        fflush(stdout);
         printf("$ ");
         line = shell_read_line(&status);
         check_jobs();
@@ -256,7 +253,7 @@ void check_jobs() {
     }
 }
 void create_job_entry(int job_id, char* line) {
-    printf("Creating job entry for %s\n", line);
+    /*printf("Creating job entry for %s\n", line);*/
     Job* j = (Job*)malloc(sizeof(Job));
     j->job_id= job_id;
     j->line = (char*)malloc((strlen(line) + 1) * sizeof(char));
@@ -281,11 +278,11 @@ Job* get_job_entry(int job_id) {
 }
 void remove_job_entry(int job_id) {
     Job* trav = JOB_STACK;
-    printf("Trying to remove job entry...\n");
+    /*printf("Trying to remove job entry...\n");*/
     while (trav) {
         if (trav->job_id == job_id) {
             /* found it */
-            printf("Removing job entry for %d\n", job_id);
+            /*printf("Removing job entry for %d\n", job_id);*/
             if (trav->above) {
                 if (trav->below)
                     trav->below->above = trav->above;
@@ -352,7 +349,7 @@ char** shell_split_line(char* line, char* bg){
     while (tokens[position]) {
         ++position;
     }
-    printf("position: %d\n", position);
+    /*printf("position: %d\n", position);*/
     if (position > 0){
         if (strcmp(tokens[position - 1], "&") == 0) {
             *bg = TRUE;
@@ -387,7 +384,7 @@ Process* shell_create_pipeline(char** args, int job_id){
         offset = k;
         for (; k < i; ++k){
             pipeline[j].args[k - offset] = args[k];
-            printf("pipeline[%d].args[%d] = %s\n", j, k-offset, args[k]);
+            /*printf("pipeline[%d].args[%d] = %s\n", j, k-offset, args[k]);*/
         }
         pipeline[j].args[k - offset] = NULL;
 
@@ -398,10 +395,10 @@ Process* shell_create_pipeline(char** args, int job_id){
         ++k;
     }
     pipeline[j].proc = NULL;
-    i = 0;
+    /*i = 0;
     while (pipeline[i].proc != NULL){
         printf("%s\n", pipeline[i++].proc);
-    }
+    }*/
     return pipeline;
 }
 
@@ -413,19 +410,20 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     char* errmsg;
     group = -1;
     if (pipeline[0].proc == NULL){
+        remove_job_entry(job_id);
         return 0;
     }
 
     while (pipeline[num_procs].proc != NULL){
         ++num_procs;
     }
-    printf("num_procs: %d\n", num_procs);
+    /*printf("num_procs: %d\n", num_procs);*/
     if (num_procs > 1) {
         fds = (int*)malloc(2 * (num_procs - 1) * sizeof(int));
         for (i = 0; i < num_procs - 1; ++i) {
             pipe(fds + i * 2);
-            printf("InputFD: %d\n", *(fds + i * 2));
-            printf("OutputFD: %d\n", *(fds + i * 2 + 1));
+            /*printf("InputFD: %d\n", *(fds + i * 2));
+            printf("OutputFD: %d\n", *(fds + i * 2 + 1));*/
         }
     }
     j=0;
@@ -433,53 +431,51 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     for (i = 0; i < num_procs; ++i){
         for (k = 0; k < shell_num_builtins(); ++k) { 
             if (strcmp(BUILTIN_STR[k], pipeline[i].proc) == 0) {
-                printf("Found built-in %s...\n", BUILTIN_STR[k]);
+                /*printf("Found built-in %s...\n", BUILTIN_STR[k]);*/
                 remove_job_entry(pipeline[i].job_id);
                 return BUILTIN_FUNC[k](pipeline[i].args);
             }
         } 
-        printf("calling fork...\n");
+        /*printf("calling fork...\n");*/
         pid = fork();
-        printf("pid is %d\n", pid);
+        /*printf("pid is %d\n", pid);*/
         if (pid != 0) {
             /* parent -- insert into process table */
             if (group == -1){
                 group = pid;
             }
-            j = 0;
-            Job* j = get_job_entry(job_id);
-            if (!j->pid) {
-                j->pid = pid;
-            }
             if (setpgid(pid, group) != 0) {
-                printf("OMG ERROR ========%d========\n", errno);
-            } else {
-                printf("Group successfully set to %d...\n", group);
+                perror("yash");
+                _exit(1);
+            } 
+            Job* trav = get_job_entry(job_id);
+            if (!trav->pid) {
+                trav->pid = pid;
             }
             pipeline[i].pid = pid;
         } else  {
             /* child */
             /* piped input */
-            printf("Child %d: %s\n", i, pipeline[i].proc);
+            /*printf("Child %d: %s\n", i, pipeline[i].proc);*/
             if (i > 0){
                 pipeline[i].in = fds[(i - 1) * 2];
-                printf("Child %s piping input fds[%d]: %d...\n", pipeline[i].proc, (i-1)*2, pipeline[i].in);
+                /*printf("Child %s piping input fds[%d]: %d...\n", pipeline[i].proc, (i-1)*2, pipeline[i].in);*/
                 if (dup2(pipeline[i].in, 0) == -1) {
                     perror("yash");
                     _exit(1);
                 }
-                printf("Closing output fds[%d]: %d\n", (i - 1) * 2 + 1, fds[(i-1)*2+1]);
-                fflush(stdout);
+                /*printf("Closing output fds[%d]: %d\n", (i - 1) * 2 + 1, fds[(i-1)*2+1]);
+                fflush(stdout);*/
                 close(fds[(i - 1) * 2 + 1]);
             } 
             /* piped output */
             if (pipeline[i + 1].proc != NULL) {
                 pipeline[i].out = fds[i * 2 + 1];
-                printf("Closing input fds[%d]: %d\n", i*2, fds[i * 2]);
-                fflush(stdout);
+                /*printf("Closing input fds[%d]: %d\n", i*2, fds[i * 2]);
+                fflush(stdout);*/
                 close(fds[i * 2]);
-                printf("Child %s piping output fds[%d]: %d...\n", pipeline[i].proc, i*2 + 1, pipeline[i].out);
-                fflush(stdout);
+                /*printf("Child %s piping output fds[%d]: %d...\n", pipeline[i].proc, i*2 + 1, pipeline[i].out);
+                fflush(stdout);*/
                 if (dup2(fds[i * 2 + 1], 1) == -1) {
                     printf("omg\n");
                     perror("yash");
@@ -593,7 +589,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
 
 
             /* execute */
-            printf("executing %s\n", pipeline[i].proc);
+            /*printf("executing %s\n", pipeline[i].proc);*/
             if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 fprintf(stderr, "yash: %s: command not found\n", pipeline[i].proc);
                 _exit(1);
@@ -607,7 +603,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     }
 
     /* parent code */
-    printf("File descriptor cleanup...\n");
+    /*printf("File descriptor cleanup...\n");*/
     for (i = 0; i < (num_procs - 1) * 2; ++i){
         if (close(fds[i]) != 0){
             printf("error closing fds[%d]\n", i);
@@ -615,14 +611,14 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     }
     /* clean up file descriptors */
     if (fds){
-        printf("Freeing file descriptors...\n");
+        /*printf("Freeing file descriptors...\n");*/
         free(fds);
     }
     /* check for & -- do we wait?*/
     if (!bg) {
         do {
-            /* wait for any process to finish */
-            wpid = waitpid(-1, &status, WUNTRACED);
+            /* wait for last in pipeline to finish */
+            wpid = waitpid(pid, &status, 0);
             /* wait(&status); */
             if (WIFSTOPPED(status)) {
                 Job* j = get_job_entry(job_id);
@@ -672,20 +668,14 @@ int shell_fg(char** args) {
     Job* trav = JOB_STACK;
     int i, wpid, status;
     char plusminus = '+';
-    printf("shell_fg...\n");
     while (trav) {
-        printf("trav->status: %d\n", trav->status);
         if (trav->status == BACKGROUND || trav->status == STOPPED) {
             trav->status = RUNNING;
-            printf("sending sigcont to pid %d\n", trav->pid);
             kill(trav->pid, SIGCONT);
             printf("%s\n", trav->line);
             fflush(stdout);
             do {
-                printf("Calling wait...");
-                fflush(stdout);
                 wpid = waitpid(trav->pid, &status, WUNTRACED);
-                printf("%d\n", wpid);
                 if (WIFSTOPPED(status)) {
                     trav->status = STOPPED;
                     return 0;
@@ -701,12 +691,9 @@ int shell_fg(char** args) {
 int shell_bg(char** args) {
     Job* trav = JOB_STACK;
     int i, wpid, status;
-    printf("shell_bg...\n");
     while (trav) {
-        printf("trav->status: %d\n", trav->status);
         if (trav->status == BACKGROUND || trav->status == STOPPED) {
             trav->status = RUNNING;
-            printf("sending sigcont to pid %d\n", trav->pid);
             kill(trav->pid, SIGCONT);
             printf("%s\n", trav->line);
             fflush(stdout);
