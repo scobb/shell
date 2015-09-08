@@ -25,6 +25,7 @@
 #define STOPPED 0
 #define DONE -1
 #define KILLED -2
+#define FAILED 183
 
 typedef struct Job{
     int job_id;
@@ -121,12 +122,16 @@ void handle_signal(int signum) {
 }
 
 void handle_sigchld(int signum) {
-    int i;
+    int status;
     Job* j = JOB_STACK;
-    int pid = waitpid((pid_t)(-1), 0, WNOHANG);
+    int pid = waitpid((pid_t)(-1), &status, WNOHANG);
     while (pid > 0) {
         while (j) {
             if (j->pid == pid) {
+                if (WEXITSTATUS(status) == FAILED) {
+                    j->status = FAILED;
+                    break;
+                }
                 j->status = DONE;
                 break;
             }
@@ -550,7 +555,8 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             /* execute */
             if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 fprintf(stderr, "yash: %s: command not found\n", pipeline[i].proc);
-                _exit(1);
+                remove_job_by_id(job_id);
+                _exit(FAILED);
             } else if (pid < 0) {
                 perror("yash");
                 _exit(1);
