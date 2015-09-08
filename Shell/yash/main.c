@@ -221,7 +221,7 @@ void check_jobs() {
         if (trav->status == DONE) {
             printf("[%d] %c Done\t%s\n", trav->job_id, plusminus, trav->line);
             trav = remove_job_entry(trav);
-        } else if (trav->status == KILLED) {
+        } else if (trav->status == KILLED || trav->status == FAILED) {
             trav = remove_job_entry(trav);
         } else {
             trav = trav->below;
@@ -555,7 +555,6 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             /* execute */
             if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 fprintf(stderr, "yash: %s: command not found\n", pipeline[i].proc);
-                remove_job_by_id(job_id);
                 _exit(FAILED);
             } else if (pid < 0) {
                 perror("yash");
