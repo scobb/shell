@@ -574,7 +574,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
     if (!bg) {
         do {
             /* wait for last in pipeline to finish */
-            wpid = waitpid(pid, &status, 0);
+            wpid = waitpid(pid, &status, WUNTRACED);
             if (WIFSTOPPED(status)) {
                 Job* j = get_job_by_id(job_id);
                 j->status = STOPPED;
