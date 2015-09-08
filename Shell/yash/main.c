@@ -25,7 +25,6 @@
 #define STOPPED 0
 #define DONE -1
 #define KILLED -2
-#define FAILED 183
 
 typedef struct Job{
     int job_id;
@@ -128,10 +127,6 @@ void handle_sigchld(int signum) {
     while (pid > 0) {
         while (j) {
             if (j->pid == pid) {
-                if (WEXITSTATUS(status) == FAILED) {
-                    j->status = FAILED;
-                    break;
-                }
                 j->status = DONE;
                 break;
             }
@@ -221,7 +216,7 @@ void check_jobs() {
         if (trav->status == DONE) {
             printf("[%d] %c Done\t%s\n", trav->job_id, plusminus, trav->line);
             trav = remove_job_entry(trav);
-        } else if (trav->status == KILLED || trav->status == FAILED) {
+        } else if (trav->status == KILLED) {
             trav = remove_job_entry(trav);
         } else {
             trav = trav->below;
@@ -555,7 +550,7 @@ int shell_execute_pipeline(Process* pipeline, char bg, int job_id){
             /* execute */
             if (execvp(pipeline[i].proc, pipeline[i].args) == -1) {
                 fprintf(stderr, "yash: %s: command not found\n", pipeline[i].proc);
-                _exit(FAILED);
+                _exit(1);
             } else if (pid < 0) {
                 perror("yash");
                 _exit(1);
